@@ -128,6 +128,7 @@ class MultiplaneProcess:
     def create_cal_path(self):
         self.cal_path = os.path.join(self.path, 'cal_data')
         makeFolder(self.cal_path)
+        
                                 
 
     def calibrate(self, is_bead = False): 
@@ -144,7 +145,7 @@ class MultiplaneProcess:
         print(f"Read image {self.filenames[0]}; size {image.shape}; type {image.dtype}")
         N_img = image.shape   
 
-
+        # find bbox and skew angle
         fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image) 
 
         #file_convert = fovs.astype(np.uint16)
@@ -153,6 +154,7 @@ class MultiplaneProcess:
             # figure out plane order otherwise take default order
             self.cal['dz'], self.cal['order'] = self.estimate_interplane_distance(fovs)
             #self.cal['order'] = self.get_plane_order(fovs)
+            print()
         else: 
             self.cal['order'] = self.P['order_default'] 
             self.cal['dz'] = self.P['dz']
@@ -183,7 +185,7 @@ class MultiplaneProcess:
 
         if self.log:
             self.create_cal_path()
-            tifffile.imwrite(os.path.join(calpath, self.filenames[0]), registered_subimages, 
+            tifffile.imwrite(os.path.join(self.cal_path, self.filenames[0]), registered_subimages, 
                         metadata={
                             'axes': axes,
                             'TimeIncrement': self.P['dt'],
@@ -290,14 +292,17 @@ class MultiplaneProcess:
         return scp.ndimage.rotate(stack, best_angle, axes=(1, 2), reshape=False, output=datatype, mode="wrap")
 
     def adaptiveThreshold(self, stack, n_planes=4, z_axis=0, camera_axis=1, size_estimate=None):
-        flip = self.P['flip_cam'] 
+        flip = self.P['flip_cam']
+        if 'padding' not in self.P.keys():
+            self.P['padding'] = 10
+
         dim = stack.shape[z_axis]
         remaining_axis = np.linspace(0, len(stack.shape)-1, len(stack.shape)).astype(np.int32)
         remaining_axis = np.delete(remaining_axis, [z_axis, camera_axis])
         Nx, Ny = remaining_axis[0], remaining_axis[1]
         planes_per_cam = int(n_planes/stack.shape[camera_axis])
         if size_estimate is None: 
-            size_estimate = stack.shape[Nx]*stack.shape[Ny]/(planes_per_cam)*1.2
+            size_estimate = stack.shape[Nx]*stack.shape[Ny]/(planes_per_cam)*0.8 ## adjusted from factor 1.2 (estimate should be smaller than fovsize/planes)
 
         mip = np.median(stack, axis=z_axis)
         fov_props = {}
@@ -307,22 +312,55 @@ class MultiplaneProcess:
             fov_props[cam] = {}
             stack[:,cam,:,:], deskew_angle = self.upright_images(stack[:,cam,:,:])
             angle_props[cam] = deskew_angle
-            mip = np.max(stack[:,cam,:,:], axis=z_axis) 
-            mip = skim.filters.gaussian(mip, sigma=10, preserve_range=True)
-            th = np.quantile(mip.ravel(), 0.2)
+            mip = np.median(stack[:,cam,:,:], axis=z_axis) 
+            #mip = skim.filters.gaussian(mip, sigma=5, preserve_range=True)
+            th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
+            max_val= np.max(mip.ravel())
 
+            if self.log: 
+                plt.ion()
+            '''
             props = self.threshold_segment(mip, th)
-
+            reset_counter, iter_limit = 0, 1000
             fov_size = np.mean([x.area_bbox for x in props])
-            lower_fovsize, upper_fovsize = size_estimate*0.8, size_estimate*1.15
+            lower_fovsize, upper_fovsize = size_estimate*0.8, size_estimate*1.2
+            '''
             print(f"Adaptive thresholding cam {cam}..")
-            while len(props) != planes_per_cam and not lower_fovsize < fov_size < upper_fovsize:
+
+
+            # try it with continous erosion and a background estimate as threshold
+            th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
+            bkg = np.mean([np.median([mip[:,0].ravel(), mip[:,-1].ravel()]),np.median([mip[0,:].ravel(), mip[-1,:].ravel()])])
+            w=(3,1)
+            bkg= (bkg*w[0]+th*w[1])/np.sum(w)
+            props, mask = self.erode_image(mip, size_estimate, bkg, planes_per_cam)
+            
+            '''
+            while len(props) != planes_per_cam or not lower_fovsize < fov_size < upper_fovsize:
+
+                if iter_limit == reset_counter or th < 0 or th > max_val: 
+                    th = np.quantile(mip.ravel(), np.random.rand(1))
+                    print(f"cant find proper fovs after {reset_counter} iterations , resetting thresholding to random starting point")
+                    reset_counter=0
+
                 if len(props) > planes_per_cam or fov_size < lower_fovsize:
-                    th += 10
-                elif len(props) < planes_per_cam or fov_size > upper_fovsize:
-                    th -= 4    
-                props = self.threshold_segment(mip, th)
+                    th += 3
+                #elif len(props) < planes_per_cam:
+                elif len(props) < planes_per_cam or fov_size > lower_fovsize:
+                    th -= 2    
+                reset_counter+=1
+
+                props_nonfilt = self.threshold_segment(mip, th)
+                props = self.filter_fov_size(props_nonfilt, (lower_fovsize, upper_fovsize))
+
                 fov_size = np.mean([x.area_bbox for x in props])
+            '''
+
+
+            if self.log:
+                plt.imshow(mask)
+                plt.show()
+
 
             for idx, p in enumerate(props):
                 fov_props[cam][idx] = list(p.bbox)
@@ -330,19 +368,91 @@ class MultiplaneProcess:
                     max_width = p.bbox[2]-p.bbox[0]
                 if p.bbox[3]-p.bbox[1] > max_height:
                     max_height = p.bbox[3]-p.bbox[1]
-        print("Cropping final fovs..")
-        image_crops = np.empty(shape=(n_planes, dim, max_width, max_height))
 
-        for cam_idx, cam_props in fov_props.items():
+            # apply some padding if erosion removed part of the FOV
+            max_width= np.min([max_width+self.P['padding'], mip.shape[0]]) 
+            max_height= np.min([max_height+self.P['padding'], mip.shape[1]])
+
+        # consolidate bbox size
+        image_crops = np.empty(shape=(n_planes, dim, max_width, max_height))
+        for cam_idx, cam_props in tqdm(fov_props.items(), "FOV size consolidation"):
             for planes_idx, planes_bbox in cam_props.items():
                 planes_bbox = self.adjust_bbox(mip.shape, planes_bbox, (max_width, max_height))
                 fov_idx = int(cam_idx*planes_per_cam+planes_idx)
                 image_crops[fov_idx,:,:,:] = np.expand_dims(self.crop_bbox(stack[:,cam_idx,:,:].squeeze(), planes_bbox), axis=0)
 
                 if flip[cam_idx]:
-                    image_crops[fov_idx,:,:,:] = np.flip(np.squeeze(image_crops[fov_idx,:,:,:]), axis=1) # axis change?
+                    # causes memory issues due to float conversion, do the flipping in place iteratively? 
+                    for t in range(image_crops.shape[1]):
+                        image_crops[fov_idx,t,:,:] = np.flip(np.squeeze(image_crops[fov_idx,t,:,:]), axis=1) # axis change?
+
+        if self.log: 
+            fig, ax = plt.subplots(1, n_planes)
+            for t in range(n_planes):
+                ax[t].imshow(image_crops[t,0,:,:])
+                ax[t].set_title(f'FOV_{t}')
+            fig.set_tight_layout(True) 
+            plt.show()
 
         return image_crops.astype(np.uint16), fov_props, angle_props
+
+
+
+
+    def erode_image(self, mip, size_estimate, th, n_planes):
+        # Step 1: Threshold the image to create a binary mask
+        binary_mask = mip > th
+        binary_mask = np.logical_and(np.ones(mip.shape), binary_mask > 0)
+        binary_mask = binary_mask.astype(int)
+        # Factor for size tolerance
+        size_min = size_estimate * 0.8
+        size_max = size_estimate * 1.2
+        
+        # Step 2: Iteratively apply erosion until we get the desired number of targets with the desired size
+        iteration = 0
+        while True:
+            # Erode the mask
+            eroded_mask = skim.morphology.binary_erosion(binary_mask, skim.morphology.square(3))
+            if self.log:
+                plt.imshow(eroded_mask)
+                plt.show()
+            # Label connected components
+            labeled_mask = skim.measure.label(eroded_mask)
+            
+            # Measure the properties of the labeled regions
+            regions = skim.measure.regionprops(labeled_mask)
+            
+            # Filter regions by size
+            valid_regions = [region for region in regions if size_min <= region.area_bbox <= size_max]
+            
+            # Check if the number of valid regions matches n_planes
+            if len(valid_regions) == n_planes:
+                break
+            
+            # If eroded_mask becomes empty (no targets left), break the loop
+            if not eroded_mask.any():
+                print(f"Failed to find {n_planes} targets with the desired size after {iteration} iterations. Consider adjusting parameters.")
+                break
+            
+            # Update the mask for the next iteration
+            binary_mask = eroded_mask
+            
+            iteration += 1
+        
+        # Step 3: Return the final mask and number of iterations taken
+        return valid_regions, eroded_mask
+
+
+
+    def filter_fov_size(self, fovs, s):
+        # fovs: list of potential fovs
+        # s: size estimate (lower bound, upper bound)
+        out = []
+        for f in fovs: 
+            if s[0] < f.area_bbox < s[1]:
+                out.append(f)
+        return out
+
 
     def crop_with_parameters(self, stack, P, n_planes=4, z_axis=0, camera_axis=0):
         flip = self.P['flip_cam'] 
@@ -373,19 +483,56 @@ class MultiplaneProcess:
     def threshold_segment(self, mip, th):
         binary = mip > th
         mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
+        
+
+        #morph = skim.morphology.dilation(mask)
+        # improve segmentation 14/08
+        morph = skim.morphology.dilation(mask)
+        morph = skim.morphology.erosion(mask)
+        morph = skim.morphology.area_opening(morph, area_threshold=32, connectivity=8)
+        if self.log: 
+            plt.imshow(morph)
+            plt.show()
+  
+        #segm = skim.segmentation.clear_border(morph)
+        label_image = skim.measure.label(morph)
+
+        return skim.measure.regionprops(label_image)
+    
+
+    '''
+        def threshold_segment(self, mip, th):
+        binary = mip > th
+        mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
 
         morph = skim.morphology.dilation(mask)
         #segm = skim.segmentation.clear_border(morph)
         label_image = skim.measure.label(morph)
 
         return skim.measure.regionprops(label_image)
+    '''
 
     def adjust_bbox(self, shape, bbox, bbox_size):
+        assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
+        assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
+
         for i in range(len(shape)):
-            while bbox[i+2]-bbox[i] < bbox_size[i]:
-                diff = int(bbox_size[i] - (bbox[i+2]-bbox[i]))
-                bbox[i] = int(np.max([np.floor(bbox[i]-diff/2), 0]))
-                bbox[i+2] = int(np.min([np.floor(bbox[i+2]+diff/2), shape[i]]))
+            #while bbox[i+2]-bbox[i] < bbox_size[i]:
+            diff = bbox_size[i] - (bbox[i+2]-bbox[i])
+            #bbox[i] = int(np.max([np.fix(bbox[i]-diff/2), 0]))
+            #bbox[i+2] = int(np.min([np.round(bbox[i+2]+diff/2), shape[i]]))
+
+            c0, c1 = int(np.fix(bbox[i]-diff/2)), int(np.fix(bbox[i+2]+diff/2))
+            d = 0 # final difference to check whterh bbox fits into image
+            # can not be both be true due to input check
+            if c0 < 0: 
+                d = c0
+            elif c1 > shape[i]-1:
+                d = c1 - shape[i]
+            # min max conditions shouldnt be necessarz here, check again
+            bbox[i] = int(np.max([c0 - d, 0]))
+            bbox[i+2] = int(np.min([c1 - d, shape[i]]))
+
         return bbox
 
     def crop_bbox(self, stack, bb):
@@ -449,10 +596,10 @@ class MultiplaneProcess:
     def estimate_interplane_distance(self, stack):
         from multiplane_calibration import MultiplaneCalibration
         cal = MultiplaneCalibration()
-        cal.set_zstep(self.P['dz'])
+        cal = cal.set_zstep(self.P['dz'])
         res = cal.estimate_interplane_distance(stack)
         self.create_cal_path()
-        self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
+        #self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
         self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.png')
 
         return cal.dz['dz'], cal.order
@@ -466,8 +613,9 @@ class MultiplaneProcess:
         output_name = os.path.join(outpath, fname+filetype)
         makeFolder(outpath)
         plt.show(f)
+        plt.gcf()
         plt.savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
-
+        print(f"Finished writing {output_name}")
 
 
     def execute(self):

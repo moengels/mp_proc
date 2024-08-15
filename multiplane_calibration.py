@@ -76,6 +76,7 @@ class MultiplaneCalibration:
 
     def set_zstep(self, zstep):
         self.pp['zstep'] = zstep
+        return self
         
     def get_figures(self):
         return self.figs
@@ -166,6 +167,7 @@ class MultiplaneCalibration:
     # localise position accurately with phasor method
     def localise_candidates(self, stack, pos_candidate):
         assert len(stack.shape)==3, "stack has wrong dimnensions"
+        assert pos_candidate.shape[0] > 0, "No beads found"
         rr = self.pp['roi']
         z_pos, Nx, Ny = stack.shape
         pos_sr = pos_candidate.copy().astype(np.float32)
@@ -386,8 +388,6 @@ class MultiplaneCalibration:
             res.append(params)
             fits.append(gaussian(x, *params))
 
-
-
         res = np.array(res)
         data = np.array(data)
         fits = np.array(fits)
@@ -481,8 +481,8 @@ def plot2LinesVerticalMarkers(data1, data2, xMarker, yval, fileSpecifier = "zcal
     
     ax.spines.right.set_visible(False)
     ax.spines.top.set_visible(False)
-
-    return ax
+    #fig = ax.get_figure()
+    return fig, ax
     
 #    output_name = os.path.join(outpath, fileSpecifier+".svg")
 #    plt.savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
