@@ -27,7 +27,7 @@ class MultiplaneCalibration:
         self.figs = {}
         #processing parameters
         self.pp = {'gauss_sigma': 2, # sigma for DoG gaussian kernel
-                   'roi' : 6, # roi radius around peak, to delete locs near edges 
+                   'roi' : 10, # roi radius around peak, to delete locs near edges 
                    'frame_min' : 15, # min amount of consecutive frames to consider it a bead trace
                    'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
                    'zstep': 10}  # default stage zstep size for coregistration nd PSF fitting
@@ -48,8 +48,12 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes, desc='Finding peak candidates', position=0)
         for p in range(planes):
             outer.update(1)
-            pos_candidate_all[p] = self.find_candidate_positions(stack[p,...])
+            #pos_candidate_all[p] = self.find_candidate_positions(stack[p,...])
             beadID_candidate_proj[p] = self.find_candidate_positions_in_projection(stack[p,...])
+
+            pos_candidate_all[p] = self.expand_positions_in_z(beadID_candidate_proj[p])
+        # create a list of potential positions from bead candidates 
+
 
         outer = tqdm(total=planes, desc='SR-localising peaks', position=0)
         for p in range(planes):
@@ -241,8 +245,6 @@ class MultiplaneCalibration:
                 pos_sr = delete_loc(pos_sr, loc) 
                 #np.delete(pos_sr, loc, axis=0)
                 
-
-
                 for z in range(z_loop+1, max_frames):
                     next_frame = pos_sr[pos_sr[:,2]==z]
                     next_point = self.find_closest_neighbour_in_next_frame(beads[bidx][-1][:2], next_frame)
@@ -439,6 +441,30 @@ class MultiplaneCalibration:
 
         return popt
 
+    def expand_positions_in_z(self, pos):
+        #pos: list of x,y positions of potential beads
+        # expand the list for all positions in z to fit into regular processing
+        h = self.pp['stack_height']
+        zpos = np.array(range(h))
+        #pos_o = np.empty(()) #pos.copy()
+        for p in range(pos.shape[0]):
+            temp=np.empty((h, 3))
+            temp[:,0] = pos[p][0]
+            temp[:,1] = pos[p][1]
+            temp[:,2] = zpos
+            #for z in range(h):
+            #    pos_o.append([pos[p][0], pos[p][1],z])
+            if p == 0: 
+                pos_o = temp
+            else: 
+                pos_o = np.concatenate((pos_o, temp), axis=0)
+
+        return pos_o.astype(int)
+    
+    
+################################################################################
+# END CLASS
+################################################################################
 
 def plot2LinesVerticalMarkers(data1, data2, xMarker, yval, fileSpecifier = "zcalib_", ZDIST = 1):
     
