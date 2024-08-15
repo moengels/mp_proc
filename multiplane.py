@@ -599,7 +599,7 @@ class MultiplaneProcess:
         cal = cal.set_zstep(self.P['dz'])
         res = cal.estimate_interplane_distance(stack)
         self.create_cal_path()
-        #self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
+        self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
         self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.png')
 
         return cal.dz['dz'], cal.order
@@ -612,9 +612,9 @@ class MultiplaneProcess:
 
         output_name = os.path.join(outpath, fname+filetype)
         makeFolder(outpath)
-        plt.show(f)
-        plt.gcf()
-        plt.savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
+        #plt.show(f)
+        #plt.gcf()
+        f[0].savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
         print(f"Finished writing {output_name}")
 
 

@@ -11,6 +11,28 @@ import os
 warnings.filterwarnings('ignore')
 
 
+
+'''
+cdict = {'violet': "#960792ff",
+             'orange': "#ff3b3bff", 
+             'yellow': "#b28900ff", 
+             'blue': "#009bb2ff", 
+             'aquamarin':'#529b9c', 
+             'brown':'#994133'}
+'''
+# diverging colortheme, 8 classes
+cdict = {0:'#d73027', 
+         1: '#f46d43',
+         2: '#fdae61',
+         3: '#fee090',
+         4: '#e0f3f8',
+         5: '#abd9e9',
+         6: '#74add1',
+         7: '#4575b4'}
+
+global clist
+clist = list(cdict.values())
+
 class MultiplaneCalibration:
     # calibration on diffraction limited bead data
     # fovs of subimages already selected, transformation not yet calculated
@@ -382,6 +404,7 @@ class MultiplaneCalibration:
         res = []
         fits = []
         data = []
+        n = []
         for t in self.tracks.keys():
             y=np.mean(self.tracks[t][:,:,3], axis=0)
             # Fit the Gaussian to the data
@@ -389,13 +412,14 @@ class MultiplaneCalibration:
             params = self.fit_gaussian(x, y)
             res.append(params)
             fits.append(gaussian(x, *params))
+            n.append(self.tracks[t].shape[0])
 
         res = np.array(res)
         data = np.array(data)
         fits = np.array(fits)
         new_order = np.argsort(res[:,1])
 
-        f = plot2LinesVerticalMarkers(data, fits, res[:,1], "grayvalue [1/units]", self.pp['zstep'])
+        f = plot2LinesVerticalMarkers(data, fits, n, res[:,1],  "grayvalue [1/units]", self.pp['zstep'])
         self.figs['dz'] = f
 
 
@@ -446,14 +470,12 @@ class MultiplaneCalibration:
         # expand the list for all positions in z to fit into regular processing
         h = self.pp['stack_height']
         zpos = np.array(range(h))
-        #pos_o = np.empty(()) #pos.copy()
         for p in range(pos.shape[0]):
             temp=np.empty((h, 3))
             temp[:,0] = pos[p][0]
             temp[:,1] = pos[p][1]
             temp[:,2] = zpos
-            #for z in range(h):
-            #    pos_o.append([pos[p][0], pos[p][1],z])
+
             if p == 0: 
                 pos_o = temp
             else: 
@@ -461,24 +483,15 @@ class MultiplaneCalibration:
 
         return pos_o.astype(int)
     
-    
+
 ################################################################################
 # END CLASS
 ################################################################################
 
-def plot2LinesVerticalMarkers(data1, data2, xMarker, yval, fileSpecifier = "zcalib_", ZDIST = 1):
+def plot2LinesVerticalMarkers(data1, data2, n, xMarker, yval, ZDIST = 1):
     
-    cdict = {'violet': "#960792ff",
-             'orange': "#ff3b3bff", 
-             'yellow': "#b28900ff", 
-             'blue': "#009bb2ff"}
-    clist = list(cdict.values())
-    
-    cmap = LinearSegmentedColormap.from_list("prism_colors", clist)
-    
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(12,7))
     n_planes = len(data1[0])
-    print(f"n_planes: {n_planes}")
     #cmap = cm.get_cmap('Pastel1', 8)
     z = np.linspace(0,ZDIST*n_planes, n_planes)
     idx = 0
@@ -488,21 +501,20 @@ def plot2LinesVerticalMarkers(data1, data2, xMarker, yval, fileSpecifier = "zcal
 
     maxVal, minVal = np.max(data1), np.min(data1)
     
-    for line, line2 in zip(data1, data2):
+    for idx, (line, line2) in enumerate(zip(data1, data2)):
 
         LINES += ax.plot(z, line, color=clist[idx], alpha = 0.8, linewidth = 1)
-        lgd.append("Channel {} - rel. z: {:.0f}nm; A: {:.1f}".format(idx, xMarker[idx], np.max(line2)))
+        lgd.append("Ch{} - z: {:.0f}nm; A: {:.1f}, n: {}".format(idx, xMarker[idx]*ZDIST, np.max(line2), n[idx]))
         plt.plot(z, line2, color=clist[idx], linewidth = 1, linestyle='--', alpha = 1)
-        plt.vlines(xMarker[idx], minVal, maxVal, color=clist[idx])
-        #lgd.append(lgdlist[idx]+"_fit")
-        idx = idx+1
-        
+        plt.vlines(xMarker[idx]*ZDIST, minVal, maxVal, color=clist[idx])
 
     plt.ylim((minVal, maxVal))
     plt.xlim((0,np.max(z)))
     plt.xlabel("z 1/nm")
     plt.ylabel(yval)
-    leg = Legend(ax, LINES, lgd, loc='lower right', bbox_to_anchor=(0.5, 1.), frameon=False)
+    #leg = Legend(ax, LINES, lgd, loc='lower right', bbox_to_anchor=(0.5, 1.), frameon=False)
+    leg = Legend(ax, LINES, lgd, loc='upper right')
+    
     ax.add_artist(leg)
     
     ax.spines.right.set_visible(False)
