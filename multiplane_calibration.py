@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.legend import Legend
 import skimage.filters as skfilt
 from skimage import feature, io
+from scipy import ndimage
 from tqdm import tqdm 
 from scipy.optimize import curve_fit
 from matplotlib.colors import LinearSegmentedColormap
@@ -41,12 +42,15 @@ class MultiplaneCalibration:
     def __init__(self):
         self.dz = {}
         self.pos_sr = {}
-        self.bead_sr = {}
         self.order = []
         self.beads = {}
         self.log = False
         self.tracks={}
         self.figs = {}
+
+        self.beadID = {} # bead candidates found in maximum intensity projection
+        self.markers = {} # SR loclaised beads in MIP for tranformation finding
+        self.transform = {}
         #processing parameters
         self.pp = {'gauss_sigma': 2, # sigma for DoG gaussian kernel
                    'roi' : 10, # roi radius around peak, to delete locs near edges 
@@ -66,17 +70,15 @@ class MultiplaneCalibration:
         self.pp['planes'] = planes
         self.pp['stack_height'] = stack.shape[1]
         pos_candidate_all = {}
-        beadID_candidate_proj = {}
         outer = tqdm(total=planes, desc='Finding peak candidates', position=0)
         for p in range(planes):
             outer.update(1)
             #pos_candidate_all[p] = self.find_candidate_positions(stack[p,...])
-            beadID_candidate_proj[p] = self.find_candidate_positions_in_projection(stack[p,...])
+            self.beadID[p] = self.find_candidate_positions_in_projection(stack[p,...])
 
-            pos_candidate_all[p] = self.expand_positions_in_z(beadID_candidate_proj[p])
+            pos_candidate_all[p] = self.expand_positions_in_z(self.beadID[p])
+
         # create a list of potential positions from bead candidates 
-
-
         outer = tqdm(total=planes, desc='SR-localising peaks', position=0)
         for p in range(planes):
             self.pos_sr[p]= self.localise_candidates(stack[p,...], pos_candidate_all[p])
@@ -86,7 +88,7 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes, desc='Tracking beads in z', position=0)
         for p in range(planes):
             outer.update(1)
-            self.beads[p] = self.track_locs_in_z(self.pos_sr[p], beadID_candidate_proj[p])
+            self.beads[p] = self.track_locs_in_z(self.pos_sr[p], self.beadID[p])
             self.beads[p] = self.clean_up_tracks(self.beads[p])
 
         outer = tqdm(total=planes, desc='Convert datastructure', position=0)
@@ -97,7 +99,6 @@ class MultiplaneCalibration:
         print('Determining relative z-distances and order')
         self.dz, self.order = self.get_dz()
         return self.dz
-        #return self.tracks
 
 
     def set_zstep(self, zstep):
@@ -484,6 +485,146 @@ class MultiplaneCalibration:
         return pos_o.astype(int)
     
 
+
+    def get_transformation(self, stack):
+        # determine affine transformation between planes
+        planes = self.pp['planes']
+        
+        # if markers are empty, find them first
+        outer = tqdm(total=planes, desc='Finding markers', position=0)
+
+        for p in range(planes):
+            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p])
+            outer.update(1)
+        '''
+        # match the markers
+        outer = tqdm(total=planes, desc='Matching markers', position=0) 
+        for p in range(1,planes):
+            self.markers[p]= self
+            outer.update(1)
+        '''
+        # calculate tranformation
+        outer = tqdm(total=planes, desc='Calculating transform', position=1)
+        for p in range(1,planes):
+            self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])
+            outer.update(1)
+
+        return self
+
+    def match_markers(self, ref, tar):
+        # match keypoints of target plane to reference plane
+        matches = feature.match_descriptors(ref, tar, cross_check=True) 
+        ref_match = ref[matches[:,0]]
+        tar_match = tar[matches[:,1]]
+        return ref_match, tar_match
+
+    def apply_transformation(self, stack):
+        assert len(stack.shape) == 4, "Input stack must have 4 dimensions"
+        assert stack.shape[0]-1 == len(self.transform.keys()), f"Not enough transformations ({len(self.transform.keys())}) to apply to stack with {stack.shape[0]} planes"
+        planes = self.pp['planes']
+        h = stack.shape[1]
+
+        # apply tranformation iteratively for every slice and plane
+        outer = tqdm(total=planes-1, desc='Applying transform', position=0)
+        for p, pt in zip(range(1,planes),self.transform.values()):
+            inner = tqdm(total=h, desc='Slice', position=0)
+            for t in range(h):
+                # Transform the image using the affine transformation matrix
+                stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
+                inner.update(1)
+                #  self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])
+            outer.update(1)
+
+        return stack
+    
+
+    def calculate_transform(self, ref, tar):
+        # ensure ref & tar are of equal length and shorten if not
+        '''
+        if ref.shape[0] != tar.shape[0]:
+            ls = np.min([ref.shape[0], tar.shape[0]]) 
+            ref = ref[:ls]
+            tar = tar[:ls]
+        '''
+
+        ref, tar = self.match_markers(ref, tar)
+
+        # construct matrix for ref and target 
+        A, B = self.construct_matrices(ref, tar)
+
+        # Step 2: Solve the linear system A * affine_matrix = B
+        affine_matrix = np.linalg.lstsq(A, B, rcond=None)[0]
+
+        # Reshape the affine matrix into a 2x3 matrix
+        affine_matrix = affine_matrix.reshape(2, 3)
+
+        return affine_matrix
+    
+
+    def construct_matrices(self, src_points, dst_points):
+        # Step 1: Construct the matrix A and vector B
+        A, B = [], []
+
+        for i in range(len(src_points)):
+            x, y = src_points[i]
+            u, v = dst_points[i]
+            A.append([x, y, 1, 0, 0, 0])
+            A.append([0, 0, 0, x, y, 1])
+            B.append(u)
+            B.append(v)
+
+        A = np.array(A)
+        B = np.array(B)
+        return A, B
+
+
+    def find_markers(self, stack, id):
+        # localise candidates from MIP stack
+        assert len(stack.shape)==3, "stack has wrong dimensions"
+        z_pos, Nx, Ny = stack.shape
+        mip = np.max(stack, axis=0)
+        rr = self.pp['roi']
+        pos_sr = np.empty((id.shape[0], 2), dtype=np.float32)
+        for peak in range(id.shape[0]):
+            l = id[peak]
+            roi = mip[int(l[0]-rr):int(l[0]+rr), int(l[1]-rr):int(l[1]+rr)]
+        
+            # sr position in roi crop 
+            roi_pos = list(self.phasor_localise(roi))
+
+            # update to global coordinates
+            sr_pos = [l[0]-rr+roi_pos[0], l[1]-rr+roi_pos[1]]
+
+            pos_sr[peak][0] = sr_pos[0] # ypos
+            pos_sr[peak][1] = sr_pos[1] # xpos
+
+        return pos_sr
+    
+
+    def display_transformations(self):
+        # Create a simple grid
+        x = np.linspace(0, 100, 101)
+        y = np.linspace(0, 100, 101)
+        grid_x, grid_y = np.meshgrid(x, y)
+        grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
+        
+        # Plot the original and transformed grids
+        fig, axs = plt.subplots(1, len(self.transform.keys())+1, figsize=(15, 10))
+
+        plot_grid(axs[0], grid_points, 'default')
+
+        for ax, (name, matrix) in zip(axs[1:], self.transform.items()):
+            transformed_points = apply_display_affine_transform(matrix, grid_points)
+            plot_grid(ax, transformed_points, name)
+
+        plt.tight_layout()
+        plt.show()
+
+
+
+
+
+
 ################################################################################
 # END CLASS
 ################################################################################
@@ -611,3 +752,16 @@ def delete_loc(matrix, loc_to_delete):
 def gaussian(x, amp, mean, stddev, offset):
     return amp * np.exp(-((x - mean) ** 2) / (2 * stddev ** 2)) + offset
 
+# Function to plot the original and transformed grid
+def plot_grid(ax, points, title, color='b'):
+    ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=15)
+    ax.set_title(title)
+    #ax.set_xlim(-2, 10)
+    #ax.set_ylim(-2, 10)
+    ax.grid(True)
+    ax.set_aspect('equal')
+
+
+def apply_display_affine_transform(matrix, points):
+    transformed_points = np.dot(matrix[:, :2], points.T).T + matrix[:, 2]
+    return transformed_points
