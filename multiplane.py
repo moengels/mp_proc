@@ -41,6 +41,7 @@ class MultiplaneProcess:
     P['dpixel']=7 # remove pixels from frame to remove registration artifacts
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
+    P['padding'] = 30 # padding of found FOV
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -294,7 +295,7 @@ class MultiplaneProcess:
     def adaptiveThreshold(self, stack, n_planes=4, z_axis=0, camera_axis=1, size_estimate=None):
         flip = self.P['flip_cam']
         if 'padding' not in self.P.keys():
-            self.P['padding'] = 10
+            self.P['padding'] = 30
 
         dim = stack.shape[z_axis]
         remaining_axis = np.linspace(0, len(stack.shape)-1, len(stack.shape)).astype(np.int32)
@@ -370,8 +371,8 @@ class MultiplaneProcess:
                     max_height = p.bbox[3]-p.bbox[1]
 
             # apply some padding if erosion removed part of the FOV
-            max_width= np.min([max_width+self.P['padding'], mip.shape[0]]) 
-            max_height= np.min([max_height+self.P['padding'], mip.shape[1]])
+            max_width= np.min([max_width+self.P['padding'], mip.shape[0]]).astype(int) 
+            max_height= np.min([max_height+self.P['padding'], mip.shape[1]]).astype(int)
 
         # consolidate bbox size
         image_crops = np.empty(shape=(n_planes, dim, max_width, max_height))
@@ -423,7 +424,7 @@ class MultiplaneProcess:
             regions = skim.measure.regionprops(labeled_mask)
             
             # Filter regions by size
-            valid_regions = [region for region in regions if size_min <= region.area_bbox <= size_max]
+            valid_regions = [r for r in regions if size_min <= r.area_bbox <= size_max]
             
             # Check if the number of valid regions matches n_planes
             if len(valid_regions) == n_planes:
@@ -517,22 +518,30 @@ class MultiplaneProcess:
         assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
 
         for i in range(len(shape)):
-            #while bbox[i+2]-bbox[i] < bbox_size[i]:
-            diff = bbox_size[i] - (bbox[i+2]-bbox[i])
-            #bbox[i] = int(np.max([np.fix(bbox[i]-diff/2), 0]))
-            #bbox[i+2] = int(np.min([np.round(bbox[i+2]+diff/2), shape[i]]))
 
-            c0, c1 = int(np.fix(bbox[i]-diff/2)), int(np.fix(bbox[i+2]+diff/2))
-            d = 0 # final difference to check whterh bbox fits into image
-            # can not be both be true due to input check
-            if c0 < 0: 
-                d = c0
-            elif c1 > shape[i]-1:
-                d = c1 - shape[i]
-            # min max conditions shouldnt be necessarz here, check again
-            bbox[i] = int(np.max([c0 - d, 0]))
-            bbox[i+2] = int(np.min([c1 - d, shape[i]]))
+            if bbox_size[i] == shape[i]:
+                bbox[i] = 0
+                #bbox[i+2] = int(np.min([c1 - d, shape[i]]))
+                bbox[i+2] = shape[i]
+            else:
 
+                #while bbox[i+2]-bbox[i] < bbox_size[i]:
+                diff = bbox_size[i] - (bbox[i+2]-bbox[i])
+
+                #c0, c1 = int(np.fix(bbox[i]-diff/2)), int(np.round(bbox[i+2]+diff/2))
+                c0, c1 = bbox[i]-diff/2, bbox[i+2]+diff/2
+                d = 0 # final difference to check whether bbox fits into image
+                # can not be both be true due to input check
+                if c0 < 0: 
+                    d = c0
+                #elif c1 > shape[i]-1:
+                elif c1 > shape[i]:
+                    d = c1 - shape[i]
+                # min max conditions shouldnt be necessarz here, check again
+                bbox[i] = int(np.max([np.fix(c0 - d), 0]))
+                #bbox[i] = int(c0 - d)
+                bbox[i+2] = int(np.min([np.ceil(c1 - d), shape[i]]))
+                #bbox[i+2] = int(c1 - d)
         return bbox
 
     def crop_bbox(self, stack, bb):
@@ -677,24 +686,6 @@ class MultiplaneProcess:
         #    if not os.path.isfile(file):
         #        continue
 
-
-'''
-            stack = tifffile.imread(file)
-            # for single plane data handling
-            if len(stack.shape) == 4:
-                stack = stack[:, 0, :, :]
-
-            P = None
-            if P is None:
-                image_crops, fov_props, angle_props = self.adaptiveThreshold(stack, 4, 0, 1)
-                P = {"fovs": fov_props, "deg": angle_props}
-            else:
-                image_crops = self.crop_with_parameters(stack, P, 4, 0, 1)
-
-            self.save_yaml(image_crops, self.output_path)
-            self.save_stack(image_crops)
-            
-'''             
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
