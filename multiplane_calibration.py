@@ -461,8 +461,11 @@ class MultiplaneCalibration:
         stddev_init = np.sqrt(np.sum(y * (x - mean_init) ** 2) / np.sum(y))
         offset_init = np.min(y)
         
+        bounds_low = (0, 0, 0.1, 0) # amp, mean, stddev, offset
+        bounds_up = (10*amp_init, np.max(x), 100*stddev_init, np.max(y)) # amp, mean, stddev, offset
+
         # Use curve_fit to fit the Gaussian function to the data
-        popt, pcov = curve_fit(gaussian, x, y, p0=[amp_init, mean_init, stddev_init, offset_init])
+        popt, pcov = curve_fit(gaussian, x, y, p0=[amp_init, mean_init, stddev_init, offset_init], bounds=(bounds_low, bounds_up))
 
         return popt
 

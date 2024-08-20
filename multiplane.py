@@ -538,10 +538,22 @@ class MultiplaneProcess:
                 elif c1 > shape[i]:
                     d = c1 - shape[i]
                 # min max conditions shouldnt be necessarz here, check again
-                bbox[i] = int(np.max([np.fix(c0 - d), 0]))
+                bbox[i] = int(np.max([np.rint(c0 - d), 0]))
                 #bbox[i] = int(c0 - d)
-                bbox[i+2] = int(np.min([np.ceil(c1 - d), shape[i]]))
+                bbox[i+2] = int(np.min([np.rint(c1 - d), shape[i]]))
                 #bbox[i+2] = int(c1 - d)
+
+                # safety check cause im a fucking idiot and cant get the stupid numpy rounding rules right (even, odd numbers and .5)
+                # so,metimes bbox is one off, correct that
+                dd = (bbox[i+2]-bbox[i])-bbox_size[i]
+                if dd>0:
+                    bbox[i+2] -= dd
+                elif dd<0:
+                    if bbox[i+2] < shape[i]:
+                        bbox[i+2] -= dd
+                    else:
+                        bbox[i] += dd
+
         return bbox
 
     def crop_bbox(self, stack, bb):
