@@ -516,7 +516,7 @@ class MultiplaneCalibration:
 
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
-        matches = feature.match_descriptors(ref, tar, cross_check=True) 
+        matches = feature.match_descriptors(ref, tar, max_distance=50, cross_check=True) 
         ref_match = ref[matches[:,0]]
         tar_match = tar[matches[:,1]]
         return ref_match, tar_match
@@ -606,8 +606,8 @@ class MultiplaneCalibration:
 
     def display_transformations(self):
         # Create a simple grid
-        x = np.linspace(0, 100, 101)
-        y = np.linspace(0, 100, 101)
+        x = np.linspace(0, 100, 26)
+        y = np.linspace(0, 100, 26)
         grid_x, grid_y = np.meshgrid(x, y)
         grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
         
@@ -757,7 +757,8 @@ def gaussian(x, amp, mean, stddev, offset):
 
 # Function to plot the original and transformed grid
 def plot_grid(ax, points, title, color='b'):
-    ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=15)
+    #ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=3)
+    ax.scatter(points[:, 0], points[:, 1], s=3, c=color, marker='o')
     ax.set_title(title)
     #ax.set_xlim(-2, 10)
     #ax.set_ylim(-2, 10)

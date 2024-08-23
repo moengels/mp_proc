@@ -41,7 +41,7 @@ class MultiplaneProcess:
     P['dpixel']=7 # remove pixels from frame to remove registration artifacts
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
-    P['padding'] = 30 # padding of found FOV
+    P['padding'] = 20 # padding of found FOV
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -295,7 +295,7 @@ class MultiplaneProcess:
     def adaptiveThreshold(self, stack, n_planes=4, z_axis=0, camera_axis=1, size_estimate=None):
         flip = self.P['flip_cam']
         if 'padding' not in self.P.keys():
-            self.P['padding'] = 30
+            self.P['padding'] = 20
 
         dim = stack.shape[z_axis]
         remaining_axis = np.linspace(0, len(stack.shape)-1, len(stack.shape)).astype(np.int32)
@@ -701,6 +701,6 @@ class MultiplaneProcess:
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, np.ndarray):
+        if isinstance(obj, np.ndarray) or isinstance(obj, np.generic):
             return obj.tolist()
         return super().default(obj)
