@@ -98,6 +98,7 @@ class MultiplaneCalibration:
             
         print('Determining relative z-distances and order')
         self.dz, self.order = self.get_dz()
+        print(self.dz)
         return self.dz
 
 
@@ -126,7 +127,9 @@ class MultiplaneCalibration:
         # clean up locs from the edges 
         
         th = np.std(mip_filt)*2 # minval local max
+        
         locs = feature.peak_local_max(mip_filt, threshold_abs = th)
+        #locs = feature.peak_local_max(mip_filt, threshold_rel = 0.5)
 
         # consolidate by removing locs from the borders
         markForDeletion = []

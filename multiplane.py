@@ -33,6 +33,7 @@ class MultiplaneProcess:
     P = {}
     P['NA_ill']=0.27
     P['dz']=620 #nm
+    P['dz_stage']=  100 #nm
     P['dt']=30 #ms, default
     P['dF_batch']=1000 #frames, framebatch_size default
     P['do_phase']=False #bool whether to calculate phase from brightfield
@@ -153,6 +154,7 @@ class MultiplaneProcess:
 
         if is_bead: 
             # figure out plane order otherwise take default order
+            self.update_metadata(get_fileID(self.filenames[0]))
             self.cal['dz'], self.cal['order'] = self.estimate_interplane_distance(fovs)
             #self.cal['order'] = self.get_plane_order(fovs)
             print()
@@ -231,6 +233,9 @@ class MultiplaneProcess:
         for k in self.meta.keys():
             self.meta[k] = self.parse_metafile(k)
         return self.meta
+    
+    def update_metadata(self, filename):
+        self.P['dz_stage']=  float(self.meta[filename]['z-step_um'])*1000 #nm
     
     
     def estimate_brightess_from_stack(self, stack):
@@ -617,7 +622,7 @@ class MultiplaneProcess:
     def estimate_interplane_distance(self, stack):
         from multiplane_calibration import MultiplaneCalibration
         cal = MultiplaneCalibration()
-        cal = cal.set_zstep(self.P['dz'])
+        cal = cal.set_zstep(self.P['dz_stage'])
         res = cal.estimate_interplane_distance(stack)
         self.create_cal_path()
         self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
