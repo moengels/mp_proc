@@ -43,6 +43,7 @@ class MultiplaneProcess:
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
     P['padding'] = 20 # padding of found FOV
 
+
     file_extensions = [".tif", ".tiff"]
     log = False
 
@@ -57,6 +58,7 @@ class MultiplaneProcess:
         self.meta = {}
         self.cal = {}
         self.is_bead = False
+        self.mcal = None # multiplane calibration instance
         #self.path = self.select_data_directory()
 
 
@@ -153,7 +155,7 @@ class MultiplaneProcess:
 
         if is_bead: 
             # figure out plane order otherwise take default order
-            self.cal['dz'], self.cal['order'] = self.estimate_interplane_distance(fovs)
+            self.cal['dz'], self.cal['order'], self.mcal = self.estimate_interplane_distance(fovs)
             #self.cal['order'] = self.get_plane_order(fovs)
             print()
         else: 
@@ -170,10 +172,17 @@ class MultiplaneProcess:
             self.cal['brightness'] = self.estimate_brightess_from_stack(fovs[self.cal['order'][::-1],:,:,:]) 
 
         if 'transform' not in self.cal.keys():
-            self.cal['transform'] = self.get_average_transform_via_xcorr(fovs[self.cal['order'][::-1],:,:,:], fps)
+            if is_bead:
+                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'][::-1],:,:,:])
+                self.mcal.display_transformations()
+            else:
+                self.cal['transform'] = self.get_average_transform_via_xcorr(fovs[self.cal['order'][::-1],:,:,:], fps)
 
         print("Registration of data...")
-        registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+        if is_bead:
+            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:])
+        else:
+            registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
 
         registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
         if len(registered_subimages.shape) == 4:
@@ -181,8 +190,6 @@ class MultiplaneProcess:
         else:
             # axes = 'ZCTYX'
             axes = 'CTZYX'
-
-  
 
         if self.log:
             self.create_cal_path()
@@ -201,7 +208,7 @@ class MultiplaneProcess:
     def get_plane_order(self, stack):
         return stack
     
-    def write_calibration(self):
+    def write_calibration(self):        
         #makeFolder(path)
         with open(os.path.join(self.path,'cal'), 'w') as yaml_file:
             #yaml.dump(self.cal, yaml_file, default_flow_style=False)
@@ -623,7 +630,7 @@ class MultiplaneProcess:
         self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.svg')
         self.write_figure(cal.figs['dz'], self.cal_path, "interplane_distance", '.png')
 
-        return cal.dz['dz'], cal.order
+        return cal.dz['dz'], cal.order, cal
 
 
     def write_figure(self, f, outpath, fname, filetype):

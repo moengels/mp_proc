@@ -512,7 +512,7 @@ class MultiplaneCalibration:
             self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])
             outer.update(1)
 
-        return self
+        return self.transform
 
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
