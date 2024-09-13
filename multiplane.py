@@ -344,7 +344,7 @@ class MultiplaneProcess:
             # try it with continous erosion and a background estimate as threshold
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
             bkg = np.mean([np.median([mip[:,0].ravel(), mip[:,-1].ravel()]),np.median([mip[0,:].ravel(), mip[-1,:].ravel()])])
-            w=(3,1)
+            w=(9,1)
             bkg= (bkg*w[0]+th*w[1])/np.sum(w)
             props, mask = self.erode_image(mip, size_estimate, bkg, planes_per_cam)
             
@@ -423,6 +423,7 @@ class MultiplaneProcess:
         
         # Step 2: Iteratively apply erosion until we get the desired number of targets with the desired size
         iteration = 0
+        fail = False
         while True:
             # Erode the mask
             eroded_mask = skim.morphology.binary_erosion(binary_mask, skim.morphology.square(3))
@@ -444,8 +445,17 @@ class MultiplaneProcess:
             
             # If eroded_mask becomes empty (no targets left), break the loop
             if not eroded_mask.any():
-                print(f"Failed to find {n_planes} targets with the desired size after {iteration} iterations. Consider adjusting parameters.")
-                break
+
+                if fail:
+                    print(f"Failed to find {n_planes} targets with the desired size after {iteration} iterations. Consider adjusting parameters.")
+                    break
+                else: 
+                    th = th/2
+                    binary_mask = mip > th
+                    binary_mask = np.logical_and(np.ones(mip.shape), binary_mask > 0)
+                    binary_mask = binary_mask.astype(int)
+                    fail = True
+                    continue
             
             # Update the mask for the next iteration
             binary_mask = eroded_mask
