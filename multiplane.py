@@ -42,7 +42,7 @@ class MultiplaneProcess:
     P['dpixel']=7 # remove pixels from frame to remove registration artifacts
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
-    P['padding'] = 20 # padding of found FOV
+    P['padding'] = 10 # padding of found FOV
 
 
     file_extensions = [".tif", ".tiff"]

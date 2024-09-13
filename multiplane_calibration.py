@@ -89,7 +89,7 @@ class MultiplaneCalibration:
         for p in range(planes):
             outer.update(1)
             self.beads[p] = self.track_locs_in_z(self.pos_sr[p], self.beadID[p])
-            self.beads[p] = self.clean_up_tracks(self.beads[p])
+            #self.beads[p] = self.clean_up_tracks(self.beads[p])
 
         outer = tqdm(total=planes, desc='Convert datastructure', position=0)
         for p in range(planes):
