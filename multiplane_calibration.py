@@ -524,15 +524,15 @@ class MultiplaneCalibration:
         tar_match = tar[matches[:,1]]
         return ref_match, tar_match
 
-    def apply_transformation(self, stack):
+    def apply_transformation(self, stack, transform):
         assert len(stack.shape) == 4, "Input stack must have 4 dimensions"
-        assert stack.shape[0]-1 == len(self.transform.keys()), f"Not enough transformations ({len(self.transform.keys())}) to apply to stack with {stack.shape[0]} planes"
+        assert stack.shape[0]-1 == len(self.transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
         planes = self.pp['planes']
         h = stack.shape[1]
 
         # apply tranformation iteratively for every slice and plane
         outer = tqdm(total=planes-1, desc='Applying transform', position=0)
-        for p, pt in zip(range(1,planes),self.transform.values()):
+        for p, pt in zip(range(1,planes),transform.values()):
             inner = tqdm(total=h, desc='Slice', position=0)
             for t in range(h):
                 # Transform the image using the affine transformation matrix

@@ -182,7 +182,7 @@ class MultiplaneProcess:
 
         print("Registration of data...")
         if is_bead:
-            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:])
+            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
         else:
             registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
 
@@ -661,6 +661,15 @@ class MultiplaneProcess:
         print(f"Finished writing {output_name}")
 
 
+#######################################################################
+    def get_FOVs(self, image):
+        self.cal['fovs'], self.cal['deg']
+        fovs=image
+        return fovs  
+    
+    def apply_brightness_correction(self, image):
+        return image
+
     def execute(self):
         for self.root, _, self.filenames in os.walk(self.path):
             self.filenames = [os.path.join(self.root, file) for file in self.filenames if file.endswith(tuple(self.file_extensions))]
@@ -714,6 +723,50 @@ class MultiplaneProcess:
                 for row in range(image.shape[0]):
                     for col in range(image.shape[1]):
                         axs[col, row].imshow(image[row, col,...])
+
+            ### 
+
+            N_img = image.shape 
+            # apply deg rotation and fov cropping
+            fovs = self.get_FOVs(image) 
+
+            fps = np.ones(N_img[0])*(N_img[1]/2)
+            fps = fps.astype(np.uint16)
+
+            if 'brightness' not in self.cal.keys():
+                self.cal['brightness'] = self.apply_brightness_correction(fovs[self.cal['order'][::-1],:,:,:]) 
+
+
+            # check whether transform in cal data is translation only or affine 
+            # simplified test via var type
+            if isinstance(self.cal['transform'], dict): 
+                #self.cal['transform'][1].shape == (2,3):
+                is_affine = True
+            #elif self.cal['transform'][1].shape == (3, 2):
+            else:
+                is_affine = False
+
+
+            print("Registration of data...")
+            if is_affine:
+                if self.mcal is None:
+                    from multiplane_calibration import MultiplaneCalibration
+                    self.mcal = MultiplaneCalibration()
+                 
+                registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+            else:
+                registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+
+            # clean up values outside 16bit tiff range    
+            registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
+            if len(registered_subimages.shape) == 4:
+                axes = 'ZTYX'
+            else:
+                # axes = 'ZCTYX'
+                axes = 'CTZYX'
+
+            # sasve stack
+
 
 
         #for file in tqdm(self.filenames):
