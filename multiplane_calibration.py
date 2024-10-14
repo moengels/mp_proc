@@ -89,7 +89,7 @@ class MultiplaneCalibration:
         for p in range(planes):
             outer.update(1)
             self.beads[p] = self.track_locs_in_z(self.pos_sr[p], self.beadID[p])
-            #self.beads[p] = self.clean_up_tracks(self.beads[p])
+            self.beads[p] = self.clean_up_tracks(self.beads[p])
 
         outer = tqdm(total=planes, desc='Convert datastructure', position=0)
         for p in range(planes):
@@ -526,8 +526,13 @@ class MultiplaneCalibration:
 
     def apply_transformation(self, stack, transform):
         assert len(stack.shape) == 4, "Input stack must have 4 dimensions"
-        assert stack.shape[0]-1 == len(self.transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
-        planes = self.pp['planes']
+        assert stack.shape[0]-1 == len(transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
+        
+        if 'planes' in self.pp.keys():
+            planes = self.pp['planes']
+        else:
+            planes = stack.shape[0]
+            
         h = stack.shape[1]
 
         # apply tranformation iteratively for every slice and plane
@@ -535,7 +540,11 @@ class MultiplaneCalibration:
         for p, pt in zip(range(1,planes),transform.values()):
             inner = tqdm(total=h, desc='Slice', position=0)
             for t in range(h):
-                # Transform the image using the affine transformation matrix
+                # convert json ecnoded list to numpy array if needed
+                if isinstance(pt, list):
+                    pt = np.array(pt)
+
+                # Transform a single image using the affine transformation matrix
                 stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
                 inner.update(1)
                 #  self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])

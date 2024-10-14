@@ -9,6 +9,7 @@ import yaml
 from tkinter import filedialog
 from tkinter import *
 import json
+from glob import glob
 
 from utils.qpmain import qpmain
 from utils.phase_structure import phase_structure
@@ -38,10 +39,12 @@ class MultiplaneProcess:
     P['dF_batch']=1000 #frames, framebatch_size default
     P['do_phase']=False #bool whether to calculate phase from brightfield
     P['do_preproc']=True #bool whether to do preprocessing (FOV detection, cal estimation etc)
-    P['ncams']=2 # remove pixels 
+    P['ncams']=2 #how many detectors used 
+    P['nplanes']= 8 # how many planes across all cameras
     P['dpixel']=7 # remove pixels from frame to remove registration artifacts
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
+    P['flip_axis'] = 2 # axis along which planes are mirrored
     P['padding'] = 10 # padding of found FOV
 
 
@@ -59,6 +62,8 @@ class MultiplaneProcess:
         self.meta = {}
         self.cal = {}
         self.is_bead = False
+        self.save_individual = False
+        self.deskew_cam = True
         self.mcal = None # multiplane calibration instance
         #self.path = self.select_data_directory()
 
@@ -84,19 +89,20 @@ class MultiplaneProcess:
     
 
     def load_calibration(self):
-        if not os.path.exists(os.path.join(self.path, 'calib.json')):
+        if not os.path.exists(os.path.join(self.path, 'cal.json')):
             # ask for user input for calibraiton
             root = Tk()
             root.withdraw()
-            filepath = filedialog.askopenfile(title='Select calibration data file', filetypes =['*.json'])
+            filepath = filedialog.askopenfile(title='Select calibration data file', filetypes =[('Calibration file', '*.json')])
 
         else:
-            filepath = os.path.join(self.path, 'calib.json')
+            filepath = os.path.join(self.path, 'cal.json')
 
-        try: 
-            self.cal = json.load(filepath) 
-        except:
-            print("Something went wrong with loading the calibration file, skipping the process") 
+        #try: 
+        f = open(filepath.name)
+        self.cal = json.load(f, object_hook=jsonKeys2int) 
+        #except:
+        #    print("Something went wrong with loading the calibration file, skipping the process") 
 
         self.check_calibration() 
 
@@ -127,11 +133,15 @@ class MultiplaneProcess:
 
 
     def load_data(self):
-        return skim.io.imread(os.path.join(self.path, self.filenames[0]))
+        return tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
     
     def create_cal_path(self):
         self.cal_path = os.path.join(self.path, 'cal_data')
         makeFolder(self.cal_path)
+
+    def create_out_path(self):
+        self.output_path = os.path.join(self.path, 'reg')
+        makeFolder(self.output_path)
         
                                 
 
@@ -145,12 +155,25 @@ class MultiplaneProcess:
         if not self.filenames:
             self.get_files_with_metadata()
 
-        image = skim.io.imread(os.path.join(self.path, self.filenames[0]))
+        #image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
+        image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_imagej=False)
         print(f"Read image {self.filenames[0]}; size {image.shape}; type {image.dtype}")
         N_img = image.shape   
 
+        if len(N_img) == 3:
+            splits = []
+            # Split indices dynamically and append to the list
+            for i in range(self.P['ncams']):
+                splits.append(image[i::self.P['ncams']])
+
+            # reduce arrazs to same length
+            min_len = np.min([l.shape[0] for l in splits])
+            splits = [l[:min_len,...] for l in splits]
+
+            image = np.array(np.stack(splits, axis=1))
+
         # find bbox and skew angle
-        fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image) 
+        fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image, n_planes=self.P['nplanes']) 
 
         #file_convert = fovs.astype(np.uint16)
 
@@ -212,7 +235,7 @@ class MultiplaneProcess:
     
     def write_calibration(self):        
         #makeFolder(path)
-        with open(os.path.join(self.path,'cal'), 'w') as yaml_file:
+        with open(os.path.join(self.path,'cal.json'), 'w') as yaml_file:
             #yaml.dump(self.cal, yaml_file, default_flow_style=False)
             json.dump(self.cal, yaml_file, cls=NumpyEncoder)
 
@@ -250,7 +273,7 @@ class MultiplaneProcess:
         z, _,_,_ = stack.shape
         average_brightness = np.empty(shape=(z))
         for i in range(z):
-            average_brightness[i] = np.mean(stack[i,::20,:,:].squeeze())
+            average_brightness[i] = np.mean(stack[i,::2,:,:].squeeze())
         brightness_factors = [b/np.mean(average_brightness) for b in average_brightness]
         b = {i: k for i,k in enumerate(brightness_factors)}
         return b 
@@ -323,7 +346,10 @@ class MultiplaneProcess:
         max_height, max_width = 0, 0
         for cam in range(stack.shape[camera_axis]):
             fov_props[cam] = {}
-            stack[:,cam,:,:], deskew_angle = self.upright_images(stack[:,cam,:,:])
+            if self.deskew_cam:
+                stack[:,cam,:,:], deskew_angle = self.upright_images(stack[:,cam,:,:])
+            else:
+                deskew_angle = 0
             angle_props[cam] = deskew_angle
             mip = np.median(stack[:,cam,:,:], axis=z_axis) 
             #mip = skim.filters.gaussian(mip, sigma=5, preserve_range=True)
@@ -344,7 +370,7 @@ class MultiplaneProcess:
             # try it with continous erosion and a background estimate as threshold
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
             bkg = np.mean([np.median([mip[:,0].ravel(), mip[:,-1].ravel()]),np.median([mip[0,:].ravel(), mip[-1,:].ravel()])])
-            w=(9,1)
+            w=(4,1)
             bkg= (bkg*w[0]+th*w[1])/np.sum(w)
             props, mask = self.erode_image(mip, size_estimate, bkg, planes_per_cam)
             
@@ -404,6 +430,7 @@ class MultiplaneProcess:
             for t in range(n_planes):
                 ax[t].imshow(image_crops[t,0,:,:])
                 ax[t].set_title(f'FOV_{t}')
+                ax[t].axis("off")
             fig.set_tight_layout(True) 
             plt.show()
 
@@ -418,8 +445,8 @@ class MultiplaneProcess:
         binary_mask = np.logical_and(np.ones(mip.shape), binary_mask > 0)
         binary_mask = binary_mask.astype(int)
         # Factor for size tolerance
-        size_min = size_estimate * 0.8
-        size_max = size_estimate * 1.2
+        size_min = size_estimate * 0.7
+        size_max = size_estimate * 1.3
         
         # Step 2: Iteratively apply erosion until we get the desired number of targets with the desired size
         iteration = 0
@@ -477,7 +504,7 @@ class MultiplaneProcess:
         return out
 
 
-    def crop_with_parameters(self, stack, P, n_planes=4, z_axis=0, camera_axis=0):
+    def crop_with_parameters(self, stack, P, n_planes=4, z_axis=0, camera_axis=1):
         flip = self.P['flip_cam'] 
         dim = stack.shape[z_axis]
         remaining_axis = np.linspace(0, len(stack.shape)-1, len(stack.shape), dtype=int)
@@ -488,18 +515,19 @@ class MultiplaneProcess:
         fov_props = P["fovs"]
         f0 = fov_props[0][0]
         max_width, max_height = f0[2]-f0[0], f0[3]-f0[1]
-        for cam in range(stack.shape[camera_axis]):
-            stack[:,cam,:,:], _ = self.upright_images(stack[:,cam,:,:], P["deg"][cam])
+        if self.deskew_cam:
+            for cam in range(stack.shape[camera_axis]):
+                stack[:,cam,:,:], _ = self.upright_images(stack[:,cam,:,:], P["deg"][cam])
 
         image_crops = np.empty(shape=(n_planes, dim, max_width, max_height))
 
         for cam_idx, cam_props in fov_props.items():
             for planes_idx, planes_bbox in cam_props.items():
                 fov_idx = int(cam_idx*planes_per_cam+planes_idx)
-                image_crops[fov_idx,:,:,:] = np.expand_dims(self.crop_bbox(stack[:,cam_idx,:,:].squeeze(), P["fovs"][cam_idx][planes_idx]), axis=0)
+                image_crops[fov_idx,:,:,:] = np.expand_dims(self.crop_bbox(stack[:,cam_idx,:,:].squeeze(), planes_bbox), axis=0)
 
                 if flip[cam_idx]:
-                    image_crops[fov_idx,:,:,:] = np.flip(np.squeeze(image_crops[fov_idx,:,:,:]), axis=0)
+                    image_crops[fov_idx,:,:,:] = np.flip(np.squeeze(image_crops[fov_idx,:,:,:]), axis=self.P['flip_axis'])
 
         return image_crops
 
@@ -662,23 +690,21 @@ class MultiplaneProcess:
 
 
 #######################################################################
-    def get_FOVs(self, image):
-        self.cal['fovs'], self.cal['deg']
-        fovs=image
-        return fovs  
-    
+
     def apply_brightness_correction(self, image):
+        for p in range(image.shape[0]):
+            image[p,...] = np.divide(image[p,...], self.cal['brightness'][p])
         return image
 
     def execute(self):
-        for self.root, _, self.filenames in os.walk(self.path):
-            self.filenames = [os.path.join(self.root, file) for file in self.filenames if file.endswith(tuple(self.file_extensions))]
+        #for self.root, _, self.filenames in os.walk(self.path):
+        #    self.filenames = [os.path.join(self.root, file) for file in self.filenames if file.endswith(tuple(self.file_extensions))]
+        if not self.filenames:
+            self.get_files_with_metadata()
         self.filenames.sort()
         print("Data Directory:", self.path)
 
-
         self.check_calibration()
-
 
         run=True
         filecounter=0
@@ -687,55 +713,49 @@ class MultiplaneProcess:
         ncams = self.P['ncams']
         
 
-        file_specifier = os.path.splitext(self.filenames[filecounter])[0]
+        file_specifier = get_fileID(self.filenames[filecounter])
         tif = tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
         width, height = tif.pages._keyframe.keyframe.imagewidth, tif.pages._keyframe.keyframe.imagelength
 
-        while run:
+        for image in read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams']):
+        #while run:
             # file loading via tifffile plugin, reading metadata for parsing
+            '''
             try:
+                f_range=np.min([int(np.ceil(self.P['dF_batch'] / ncams)), int(np.ceil(len(tif.pages) / ncams))]) 
                 #image = tifffile.imread(os.path.join(path, filenames[0]), key=range(f, f+framebatch, framebatch))
-                image=np.zeros((int(np.ceil(self.P['dF_batch'] / ncams)), ncams, width, height))
+                #image=np.zeros((f_range, ncams, width, height))
+                image=np.zeros((f_range, ncams, height, width))
                 kk=0
-                while kk<self.P['dF_batch']:
+                print(f'\n Loading file {file_specifier} batch {idx}')
+                while kk<np.min([self.P['dF_batch'], len(tif.pages)]):
                     if f is len(tif.pages):
                         filecounter+=1 
                         tif=tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
                         f=0
                     
-                    image[int(np.floor(kk/ncams)),int(kk%ncams), :,:] = np.transpose(tif.pages[int(f)].asarray(), [1,0])
+                    #image[int(np.floor(kk/ncams)),int(kk%ncams), :,:] = np.transpose(tif.pages[int(f)].asarray(), [1,0])
+                    image[int(np.floor(kk/ncams)),int(kk%ncams), :,:] = tif.pages[int(f)].asarray()
                     kk+=1 # current frame counter
                     f+=1 # global frame counter
                 idx+=1 # savefile counter
-
             except:
                 run=False
                 continue
+            '''
 
-
-            print(f'\n Processing {self.filenames[0]} file {idx}')
-
-
-            if self.log:
-                fig, axs= plt.subplots(image.shape[1], image.shape[0], figsize=(9, 27),
-                                subplot_kw={'xticks': [], 'yticks': []})
-                #for ax in axs.flat: 
-                for row in range(image.shape[0]):
-                    for col in range(image.shape[1]):
-                        axs[col, row].imshow(image[row, col,...])
-
+       
             ### 
-
+            idx+=1
             N_img = image.shape 
             # apply deg rotation and fov cropping
-            fovs = self.get_FOVs(image) 
+            fovs = self.crop_with_parameters(image, self.cal, n_planes=self.P['nplanes']) 
 
             fps = np.ones(N_img[0])*(N_img[1]/2)
             fps = fps.astype(np.uint16)
 
-            if 'brightness' not in self.cal.keys():
-                self.cal['brightness'] = self.apply_brightness_correction(fovs[self.cal['order'][::-1],:,:,:]) 
 
+            fovs[self.cal['order'][::-1],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'][::-1],:,:,:]) 
 
             # check whether transform in cal data is translation only or affine 
             # simplified test via var type
@@ -745,7 +765,6 @@ class MultiplaneProcess:
             #elif self.cal['transform'][1].shape == (3, 2):
             else:
                 is_affine = False
-
 
             print("Registration of data...")
             if is_affine:
@@ -760,18 +779,39 @@ class MultiplaneProcess:
             # clean up values outside 16bit tiff range    
             registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
             if len(registered_subimages.shape) == 4:
-                axes = 'ZTYX'
+                if self.save_individual:
+                    axes = 'TYX'           
+                else:
+                    axes = 'ZTYX'
             else:
-                # axes = 'ZCTYX'
-                axes = 'CTZYX'
+                # axes = 'ZCTYX
+                if self.save_individual:
+                    axes = 'CTYX'       
+                else:
+                    axes = 'CTZYX'
 
-            # sasve stack
+            # save stack
+            self.create_out_path()
 
+            if self.save_individual:
+                for plane in range(registered_subimages.shape[0]): 
+                    plane_path = os.path.join(self.output_path, str(plane))
+                    makeFolder(plane_path)
+                    tifffile.imwrite(os.path.join(plane_path, f"{file_specifier}_f{idx}_pl{plane}.ome.tiff"), registered_subimages[plane], 
+                        metadata={
+                            'TimeIncrement': self.P['dt'],
+                            'ZSpacing': self.P['dz']
+                        }
+                    ) 
 
-
-        #for file in tqdm(self.filenames):
-        #    if not os.path.isfile(file):
-        #        continue
+            else:
+                tifffile.imwrite(os.path.join(self.output_path, f"{file_specifier}_f{idx}.ome.tiff"), registered_subimages, 
+                    metadata={
+                        'axes': axes,
+                        'TimeIncrement': self.P['dt'],
+                        'ZSpacing': self.P['dz']
+                    }
+                ) 
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -779,3 +819,52 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray) or isinstance(obj, np.generic):
             return obj.tolist()
         return super().default(obj)
+    
+
+
+def jsonKeys2int(x):
+    if isinstance(x, dict):
+        return {(int(k) if k.isnumeric() else k):v for k,v in x.items()}
+    return x
+
+
+def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
+    """
+    Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
+    
+    :param folder_path: Path to the folder containing TIFF files.
+    :param batch_size: Number of frames to read in each batch.
+    :param n_cams: Number of channels (e.g., cameras) for each frame.
+    :param file_extension: File extension for TIFF files, default is 'tif'.
+    :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
+    """
+    # Get all TIFF files in the folder
+    tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+    
+    current_batch = []  # To store images for the current batch
+    
+    # Iterate through each TIFF file
+    for tiff_file in tiff_files:
+        with tifffile.TiffFile(tiff_file) as tif:
+            total_pages = len(tif.pages)
+            
+            # Iterate through pages of the current TIFF file
+            for i in range(total_pages):
+                # Read the current page as a NumPy array
+                image = tif.pages[i].asarray()
+                current_batch.append(image)
+                
+                # If the batch size is reached, process and yield the batch
+                if len(current_batch) == batch_size * n_cams:
+                    # Reshape into 4D array: (batch_size, n_cams, height, width)
+                    batch_array = np.array(current_batch)
+                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
+                    yield batch_array
+                    current_batch = []  # Reset the batch after yielding
+        
+    # If there are remaining images after all files are processed, yield them as a batch
+    if current_batch:
+        remaining_size = len(current_batch) // n_cams
+        batch_array = np.array(current_batch)
+        batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+        yield batch_array
