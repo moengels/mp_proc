@@ -9,6 +9,7 @@ from scipy.optimize import curve_fit
 from matplotlib.colors import LinearSegmentedColormap
 import warnings
 import os
+import cv2
 warnings.filterwarnings('ignore')
 
 
@@ -492,7 +493,7 @@ class MultiplaneCalibration:
     
 
 
-    def get_transformation(self, stack):
+    def get_transformation(self, stack, refplane):
         # determine affine transformation between planes
         planes = self.pp['planes']
         
@@ -510,9 +511,9 @@ class MultiplaneCalibration:
             outer.update(1)
         '''
         # calculate tranformation
-        outer = tqdm(total=planes, desc='Calculating transform', position=1)
-        for p in range(1,planes):
-            self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])
+        outer = tqdm(total=planes, desc='Calculating transform')
+        for p in range(planes):
+            self.transform[p]= self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
             outer.update(1)
 
         return self.transform
@@ -563,7 +564,7 @@ class MultiplaneCalibration:
         '''
 
         ref, tar = self.match_markers(ref, tar)
-
+        '''
         # construct matrix for ref and target 
         A, B = self.construct_matrices(ref, tar)
 
@@ -572,6 +573,8 @@ class MultiplaneCalibration:
 
         # Reshape the affine matrix into a 2x3 matrix
         affine_matrix = affine_matrix.reshape(2, 3)
+        '''
+        affine_matrix, mask = cv2.estimateAffine2D(ref, tar)
 
         return affine_matrix
     
@@ -603,15 +606,18 @@ class MultiplaneCalibration:
         for peak in range(id.shape[0]):
             l = id[peak]
             roi = mip[int(l[0]-rr):int(l[0]+rr), int(l[1]-rr):int(l[1]+rr)]
-        
-            # sr position in roi crop 
-            roi_pos = list(self.phasor_localise(roi))
+            
+            try:
+                # sr position in roi crop 
+                roi_pos = list(self.phasor_localise(roi))
 
-            # update to global coordinates
-            sr_pos = [l[0]-rr+roi_pos[0], l[1]-rr+roi_pos[1]]
+                # update to global coordinates
+                sr_pos = [l[0]-rr+roi_pos[0], l[1]-rr+roi_pos[1]]
 
-            pos_sr[peak][0] = sr_pos[0] # ypos
-            pos_sr[peak][1] = sr_pos[1] # xpos
+                pos_sr[peak][0] = sr_pos[0] # ypos
+                pos_sr[peak][1] = sr_pos[1] # xpos
+            except:
+                print(f"Skipping peak {peak} in marker ID process")
 
         return pos_sr
     

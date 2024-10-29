@@ -10,6 +10,8 @@ from tkinter import filedialog
 from tkinter import *
 import json
 from glob import glob
+import cv2
+from natsort import natsorted
 
 from utils.qpmain import qpmain
 from utils.phase_structure import phase_structure
@@ -36,7 +38,7 @@ class MultiplaneProcess:
     P['dz']=620 #nm
     P['dz_stage']=  100 #nm
     P['dt']=30 #ms, default
-    P['dF_batch']=1000 #frames, framebatch_size default
+    P['dF_batch']=2000 #frames, framebatch_size default
     P['do_phase']=False #bool whether to calculate phase from brightfield
     P['do_preproc']=True #bool whether to do preprocessing (FOV detection, cal estimation etc)
     P['ncams']=2 #how many detectors used 
@@ -45,8 +47,9 @@ class MultiplaneProcess:
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
     P['flip_axis'] = 2 # axis along which planes are mirrored
-    P['padding'] = 10 # padding of found FOV
-
+    P['padding'] = -10 # pixels for padding of found FOV
+    P['use_projection'] = 'median' # projection type to use for registration, (median, max, min
+    P['ref_plane'] = 2
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -94,12 +97,13 @@ class MultiplaneProcess:
             root = Tk()
             root.withdraw()
             filepath = filedialog.askopenfile(title='Select calibration data file', filetypes =[('Calibration file', '*.json')])
-
+            fopen = filepath.name
         else:
-            filepath = os.path.join(self.path, 'cal.json')
+            fopen = os.path.join(self.path, 'cal.json')
+
 
         #try: 
-        f = open(filepath.name)
+        f = open(fopen)
         self.cal = json.load(f, object_hook=jsonKeys2int) 
         #except:
         #    print("Something went wrong with loading the calibration file, skipping the process") 
@@ -154,9 +158,10 @@ class MultiplaneProcess:
         # check whether filelist has been filled 
         if not self.filenames:
             self.get_files_with_metadata()
-
-        #image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
-        image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_imagej=False)
+        try:
+            image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
+        except:
+            image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_imagej=False)
         print(f"Read image {self.filenames[0]}; size {image.shape}; type {image.dtype}")
         N_img = image.shape   
 
@@ -198,16 +203,22 @@ class MultiplaneProcess:
 
         if 'transform' not in self.cal.keys():
             if is_bead:
-                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'][::-1],:,:,:])
+                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'][::-1],:,:,:], self.P['ref_plane'])
                 self.mcal.display_transformations()
             else:
-                self.cal['transform'] = self.get_average_transform_via_xcorr(fovs[self.cal['order'][::-1],:,:,:], fps)
+                
+                #self.cal['transform'] = self.get_average_transform_via_xcorr(fovs[self.cal['order'][::-1],:,:,:], fps)
+                #self.cal['transform'] = self.get_average_transform_via_SIFT(fovs[self.cal['order'][::-1],:,:,:]) 
+                self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'][::-1],:,:,:]) 
 
         print("Registration of data...")
+        '''
         if is_bead:
             registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
         else:
             registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+        '''
+        registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
 
         registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
         if len(registered_subimages.shape) == 4:
@@ -351,7 +362,10 @@ class MultiplaneProcess:
             else:
                 deskew_angle = 0
             angle_props[cam] = deskew_angle
-            mip = np.median(stack[:,cam,:,:], axis=z_axis) 
+            if self.P['use_projection'] == 'median':
+                mip = np.median(stack[:,cam,:,:], axis=z_axis) 
+            else:
+                mip = np.max(stack[:,cam,:,:], axis=z_axis) 
             #mip = skim.filters.gaussian(mip, sigma=5, preserve_range=True)
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
             max_val= np.max(mip.ravel())
@@ -428,7 +442,7 @@ class MultiplaneProcess:
         if self.log: 
             fig, ax = plt.subplots(1, n_planes)
             for t in range(n_planes):
-                ax[t].imshow(image_crops[t,0,:,:])
+                ax[t].imshow(np.median(image_crops[t,:,:,:], axis=0))
                 ax[t].set_title(f'FOV_{t}')
                 ax[t].axis("off")
             fig.set_tight_layout(True) 
@@ -464,7 +478,10 @@ class MultiplaneProcess:
             regions = skim.measure.regionprops(labeled_mask)
             
             # Filter regions by size
-            valid_regions = [r for r in regions if size_min <= r.area_bbox <= size_max]
+            if iteration < 20:
+                valid_regions = [r for r in regions if size_min <= r.area_bbox <= size_max]
+            else:
+                valid_regions = [r for r in regions]
             
             # Check if the number of valid regions matches n_planes
             if len(valid_regions) == n_planes:
@@ -564,8 +581,8 @@ class MultiplaneProcess:
     '''
 
     def adjust_bbox(self, shape, bbox, bbox_size):
-        assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
-        assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
+        #assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
+        #assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
 
         for i in range(len(shape)):
 
@@ -643,6 +660,36 @@ class MultiplaneProcess:
         return transforms
 
 
+    def get_average_transform_via_SIFT(self, stack):
+        # stack: z, t, y, x 
+        # fp: focal planes (int), shape: (z,1)
+        z, t, y, x = stack.shape
+        transforms = np.empty(shape=(z-1, 256))
+        descriptor_extractor = skim.feature.SIFT(upsampling=2, c_dog=0.01, sigma_in=0.1) #BRIEF() # SIFT()
+
+        mips = np.max(stack, axis=1)  # np.empty(shape=(z,y,x))
+        descriptors = {}
+
+        descriptor_extractor.detect_and_extract(mips[0,...])
+        #descriptor_extractor.extract(mips[0,...])
+        #keypoints = descriptor_extractor.keypoints
+        descriptors[0] = descriptor_extractor.descriptors
+
+        for p in range(1, z): 
+
+            #iterate projections for their descriptors and match to first plane
+            descriptor_extractor.detect_and_extract(mips[p,...])
+            #descriptor_extractor.extract(mips[p,...])
+            #keypoints = descriptor_extractor.keypoints
+            descriptors[p] = descriptor_extractor.descriptors
+            
+            m = skim.feature.match_descriptors(descriptors[0], descriptors[p], max_ratio=0.6, cross_check=True) # matching indices in descriptor sets
+            # pixel level precision first
+            transforms[p] = skim.transform.estimate_transform('affine', descriptors[0][m[:,0]], descriptors[p][m[:,1]])
+            
+        return transforms
+
+
     def transform_stack(self, stack, transform):
         # stack: z, t, y, x 
         # transform:  (z,2) (xy shift vector)
@@ -711,11 +758,10 @@ class MultiplaneProcess:
         idx=0 # batchindex, counter
         f=0 #framecounter
         ncams = self.P['ncams']
-        
 
         file_specifier = get_fileID(self.filenames[filecounter])
-        tif = tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
-        width, height = tif.pages._keyframe.keyframe.imagewidth, tif.pages._keyframe.keyframe.imagelength
+        #tif = tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
+        #width, height = tif.pages._keyframe.keyframe.imagewidth, tif.pages._keyframe.keyframe.imagelength
 
         for image in read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams']):
         #while run:
@@ -753,8 +799,6 @@ class MultiplaneProcess:
 
             fps = np.ones(N_img[0])*(N_img[1]/2)
             fps = fps.astype(np.uint16)
-
-
             fovs[self.cal['order'][::-1],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'][::-1],:,:,:]) 
 
             # check whether transform in cal data is translation only or affine 
@@ -767,6 +811,7 @@ class MultiplaneProcess:
                 is_affine = False
 
             print("Registration of data...")
+            '''
             if is_affine:
                 if self.mcal is None:
                     from multiplane_calibration import MultiplaneCalibration
@@ -775,6 +820,8 @@ class MultiplaneProcess:
                 registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
             else:
                 registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+            '''
+            registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
 
             # clean up values outside 16bit tiff range    
             registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
@@ -793,11 +840,13 @@ class MultiplaneProcess:
             # save stack
             self.create_out_path()
 
+            print(f"Writing data to {self.output_path}")
+
             if self.save_individual:
-                for plane in range(registered_subimages.shape[0]): 
+                for plane in tqdm(range(registered_subimages.shape[0]), desc="Plane"): 
                     plane_path = os.path.join(self.output_path, str(plane))
                     makeFolder(plane_path)
-                    tifffile.imwrite(os.path.join(plane_path, f"{file_specifier}_f{idx}_pl{plane}.ome.tiff"), registered_subimages[plane], 
+                    tifffile.imwrite(os.path.join(plane_path, f"{file_specifier}_f{idx}_pl{plane}.tif"), registered_subimages[plane], 
                         metadata={
                             'TimeIncrement': self.P['dt'],
                             'ZSpacing': self.P['dz']
@@ -812,7 +861,76 @@ class MultiplaneProcess:
                         'ZSpacing': self.P['dz']
                     }
                 ) 
+        print(f"Finished processing {self.path}")
 
+
+
+    def get_affine_transform(self, stack):
+        # stack: z, t, y, x 
+        # fp: focal planes (int), shape: (z,1)
+        z, t, y, x = stack.shape
+        transforms = np.empty(shape=(z,2,3))
+        for p in range(z): 
+            # pixel level precision first
+            transforms[p] = self.find_affine_transformation(stack[self.P['ref_plane']], stack[p])
+        return transforms
+
+
+
+
+    def find_affine_transformation(self, image_stack, reference_stack):
+
+        tar = np.max(image_stack, axis=0)
+        ref = np.max(reference_stack, axis=0)
+
+        
+        # Use ORB to find keypoints and descriptors
+        orb = cv2.ORB_create(scaleFactor=1.2)
+        #orb = cv2.SURF_create()
+        keypoints1, descriptors1 = orb.detectAndCompute(tar.astype(np.uint8), None)
+        keypoints2, descriptors2 = orb.detectAndCompute(ref.astype(np.uint8), None)
+
+        # Use BFMatcher to find matches
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = bf.match(descriptors1, descriptors2)
+
+        # Sort matches by distance
+        matches = sorted(matches, key=lambda x: x.distance)
+
+        # Extract locations of matched keypoints
+        src_pts = np.float32([keypoints1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+
+        # Find the affine transformation matrix
+        matrix, mask = cv2.estimateAffine2D(src_pts, dst_pts)
+
+        return matrix
+    
+    def apply_affine_transformation(self, matrix, img):
+        # Apply the affine transformation
+        matrix = np.array(matrix, dtype=np.float32)
+        transformed_img = cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]))
+        return transformed_img
+    
+    def register_image_stack(self, stack, matrix):
+        # stack: z, t, y, x 
+        # fp: focal planes (int), shape: (z,1)
+        z, t, y, x = stack.shape
+        # Prepare an array to store transformed images
+        #transformed_stack = np.zeros_like(stack)
+
+        for i in tqdm(range(z), desc=" Image plane", position=0):
+            # Process each image in the stack
+            for j in tqdm(range(t), desc=" Timepoint", position=1, leave=False):
+        
+            # Apply the affine transformation
+                transformed_img = self.apply_affine_transformation(matrix[i], stack[i, j,...])
+                # Store the transformed image
+                stack[i,j] = transformed_img
+
+        return stack
+
+#######################################################
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -839,7 +957,8 @@ def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension
     :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
     """
     # Get all TIFF files in the folder
-    tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
     
     current_batch = []  # To store images for the current batch
     
@@ -850,10 +969,18 @@ def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension
             
             # Iterate through pages of the current TIFF file
             for i in range(total_pages):
+                try:
+                    # Read the current page as a NumPy array (skip reading metadata)
+                    image = tif.pages[i].asarray()
+                    current_batch.append(image)
+                except UnicodeDecodeError:
+                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
+                '''
                 # Read the current page as a NumPy array
                 image = tif.pages[i].asarray()
                 current_batch.append(image)
-                
+                '''
+
                 # If the batch size is reached, process and yield the batch
                 if len(current_batch) == batch_size * n_cams:
                     # Reshape into 4D array: (batch_size, n_cams, height, width)
