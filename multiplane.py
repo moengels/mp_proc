@@ -50,6 +50,7 @@ class MultiplaneProcess:
     P['padding'] = -10 # pixels for padding of found FOV
     P['use_projection'] = 'median' # projection type to use for registration, (median, max, min
     P['ref_plane'] = 2
+    P['apply_transform'] = True
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -478,7 +479,7 @@ class MultiplaneProcess:
             regions = skim.measure.regionprops(labeled_mask)
             
             # Filter regions by size
-            if iteration < 20:
+            if iteration < 10:
                 valid_regions = [r for r in regions if size_min <= r.area_bbox <= size_max]
             else:
                 valid_regions = [r for r in regions]
@@ -821,7 +822,11 @@ class MultiplaneProcess:
             else:
                 registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
             '''
-            registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+
+            if self.P['apply_transform']: 
+                registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+            else: 
+                registered_subimages = fovs[self.cal['order'][::-1],:,:,:]
 
             # clean up values outside 16bit tiff range    
             registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
