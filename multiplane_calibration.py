@@ -48,12 +48,13 @@ class MultiplaneCalibration:
         self.log = False
         self.tracks={}
         self.figs = {}
+        self.pretranslate = False
 
         self.beadID = {} # bead candidates found in maximum intensity projection
         self.markers = {} # SR loclaised beads in MIP for tranformation finding
         self.transform = {}
         #processing parameters
-        self.pp = {'gauss_sigma': 2, # sigma for DoG gaussian kernel
+        self.pp = {'gauss_sigma': 1.5, # sigma for DoG gaussian kernel
                    'roi' : 10, # roi radius around peak, to delete locs near edges 
                    'frame_min' : 15, # min amount of consecutive frames to consider it a bead trace
                    'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
@@ -117,21 +118,21 @@ class MultiplaneCalibration:
 
     def find_candidate_positions_in_projection(self, stack):
         assert len(stack.shape)==3, "stack has wrong dimensions"
-        z_pos, Nx, Ny = stack.shape
         mip = np.max(stack, axis=0)
+        locs = self.locs_from_2d(mip)
+        return locs
+    
+
+    def locs_from_2d(self, mip):
+        Nx, Ny = mip.shape
         sigma = self.pp['gauss_sigma']
-
         mip_filt = skfilt.difference_of_gaussians(mip, low_sigma=sigma)
-
-        
         # find local peaks, use situational threshold
         # clean up locs from the edges 
-        
         th = np.std(mip_filt)*2 # minval local max
         
-        locs = feature.peak_local_max(mip_filt, threshold_abs = th)
-        #locs = feature.peak_local_max(mip_filt, threshold_rel = 0.5)
-
+        locs = feature.peak_local_max(mip_filt, min_distance=7, threshold_abs = th)
+    
         # consolidate by removing locs from the borders
         markForDeletion = []
         for i in range(locs.shape[0]-1):
@@ -146,7 +147,6 @@ class MultiplaneCalibration:
         locs = np.delete(locs,markForDeletion,axis=0)
         # append z position in the stack to the loc
         locs = np.append(locs, np.zeros((locs.shape[0],1), dtype=np.uint16), axis=1)
-
         return locs
 
     def find_candidate_positions(self, stack):
@@ -427,15 +427,11 @@ class MultiplaneCalibration:
         f = plot2LinesVerticalMarkers(data, fits, n, res[:,1],  "grayvalue [1/units]", self.pp['zstep'])
         self.figs['dz'] = f
 
-
-        #tracks = self.tracks
-        #reorder tracks and get dz
-        #tracks = np.sort(tracks, order=new_order)
         res = res[new_order, :] 
-        
         self.order = new_order
         self.dz['dz'] = [res[i+1,1]-res[i,1] for i in range(res.shape[0]-1)]
         self.dz['labels'] = [f'{i+1}-{i}' for i in range(res.shape[0]-1)]
+        self.dz['fp'] = [int(nz) for nz in res[:,1]]
 
         return self.dz, self.order
     
@@ -501,7 +497,7 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes, desc='Finding markers', position=0)
 
         for p in range(planes):
-            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p])
+            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
             outer.update(1)
         '''
         # match the markers
@@ -520,7 +516,8 @@ class MultiplaneCalibration:
 
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
-        matches = feature.match_descriptors(ref, tar, max_distance=10, cross_check=True) 
+        #matches = feature.match_descriptors(ref, tar, max_distance=20, cross_check=True) 
+        matches = feature.match_descriptors(ref, tar, cross_check=True) 
         ref_match = ref[matches[:,0]]
         tar_match = tar[matches[:,1]]
         return ref_match, tar_match
@@ -540,15 +537,14 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes-1, desc='Applying transform', position=0)
         for p, pt in zip(range(1,planes),transform.values()):
             inner = tqdm(total=h, desc='Slice', position=0)
+                        # convert json ecnoded list to numpy array if needed
+            if isinstance(pt, list):
+                pt = np.array(pt)
             for t in range(h):
-                # convert json ecnoded list to numpy array if needed
-                if isinstance(pt, list):
-                    pt = np.array(pt)
-
                 # Transform a single image using the affine transformation matrix
                 stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
                 inner.update(1)
-                #  self.transform[p]= self.calculate_transform(ref=self.markers[0], tar=self.markers[p])
+                
             outer.update(1)
 
         return stack
@@ -556,51 +552,96 @@ class MultiplaneCalibration:
 
     def calculate_transform(self, ref, tar):
         # ensure ref & tar are of equal length and shorten if not
-        '''
-        if ref.shape[0] != tar.shape[0]:
-            ls = np.min([ref.shape[0], tar.shape[0]]) 
-            ref = ref[:ls]
-            tar = tar[:ls]
-        '''
+        pretranslate = self.pretranslate
+        if pretranslate:            
+            if ref.shape > tar.shape:
+                ref = self.remove_outliers(ref)
+            elif ref.shape < tar.shape:
+                tar = self.remove_outliers(tar)
 
-        ref, tar = self.match_markers(ref, tar)
-        '''
-        # construct matrix for ref and target 
-        A, B = self.construct_matrices(ref, tar)
+            ref, tar, tt = self.pre_translate_markers(ref, tar) # tt =(tx,ty) shifts 
 
-        # Step 2: Solve the linear system A * affine_matrix = B
-        affine_matrix = np.linalg.lstsq(A, B, rcond=None)[0]
+        ref_match, tar_match = self.match_markers(ref, tar)
 
-        # Reshape the affine matrix into a 2x3 matrix
-        affine_matrix = affine_matrix.reshape(2, 3)
-        '''
-        affine_matrix, mask = cv2.estimateAffine2D(ref, tar)
+        affine_matrix, mask = cv2.estimateAffine2D(ref_match, tar_match)
+        if pretranslate:
+            affine_matrix[0,2] += tt[0]
+            affine_matrix[1,2] += tt[1]
+
+        
+        else:
+            tar_match = self.apply_affine_transform_2points(tar_match, affine_matrix)
+            plt.figure()
+            plt.scatter(tar[:,0], tar[:,1], color='r', marker="o", alpha=0.3)
+            plt.scatter(ref[:,0], ref[:,1], color="black", marker="o", alpha=0.3)
+
+            plt.scatter(tar_match[:,0], tar_match[:,1], color='r', marker='+')
+            plt.scatter(ref_match[:,0], ref_match[:,1], color="black", marker='+')
+            plt.legend(["target", "reference", "warped target", "matched reference"])
+            plt.show()
 
         return affine_matrix
     
 
-    def construct_matrices(self, src_points, dst_points):
-        # Step 1: Construct the matrix A and vector B
-        A, B = [], []
 
-        for i in range(len(src_points)):
-            x, y = src_points[i]
-            u, v = dst_points[i]
-            A.append([x, y, 1, 0, 0, 0])
-            A.append([0, 0, 0, x, y, 1])
-            B.append(u)
-            B.append(v)
+    def apply_affine_transform_2points(self, points, transform_matrix):
+        """
+        Applies an affine transformation to a set of 2D points using a 2x3 transformation matrix.
+        
+        Parameters:
+        - points (np.ndarray): An Nx2 array of 2D points (each row is a point [x, y]).
+        - transform_matrix (np.ndarray): A 2x3 affine transformation matrix.
+        
+        Returns:
+        - np.ndarray: The transformed Nx2 array of points.
+        """
+        # Convert points to homogeneous coordinates by adding a column of ones
+        num_points = points.shape[0]
+        homogeneous_points = np.hstack([points, np.ones((num_points, 1))])
+        
+        # Apply the affine transformation
+        transformed_points = homogeneous_points @ transform_matrix.T
+        
+        return transformed_points
+    
+    def remove_outliers(self, data, lower_percentile=5, upper_percentile=95):
+        """
+        Removes outliers from a 2D array using percentile-based filtering.
+        
+        Parameters:
+        - data (np.ndarray): A 2D numpy array of numerical values.
+        - lower_percentile (float): The lower percentile threshold. Values below this percentile will be considered outliers.
+        - upper_percentile (float): The upper percentile threshold. Values above this percentile will be considered outliers.
+        
+        Returns:
+        - np.ndarray: A 2D numpy array with outliers removed.
+        """
+        mask = np.ones(data.shape[0], dtype=bool)
+        for i in range(data.shape[1]):
+            # Calculate the specified percentiles
+            lower_bound = np.percentile(data[:,i], lower_percentile)
+            upper_bound = np.percentile(data[:,i], upper_percentile)
+            
+            # Create a mask for values within the bounds
+            mask = mask & (data[:,i] >= lower_bound) & (data[:,i] <= upper_bound)
+        # Set outliers to NaN or remove them (depending on your needs)
+        cleaned_data = data[mask,:]  # Use np.nan for missing data representation
+        return cleaned_data  # Returning both for flexibility
 
-        A = np.array(A)
-        B = np.array(B)
-        return A, B
 
-
-    def find_markers(self, stack, id):
+    def find_markers(self, stack, id, plane=None):
         # localise candidates from MIP stack
         assert len(stack.shape)==3, "stack has wrong dimensions"
+        assert plane != None, "provide plane information to use focal plane for marker ID, now using maximum projection"
         z_pos, Nx, Ny = stack.shape
-        mip = np.max(stack, axis=0)
+
+        try: 
+            mip = stack[self.dz['fp'][plane], ...]
+            id = self.locs_from_2d(mip) 
+        except:
+            print("reverting to maximum projection in marker ID")
+            mip = np.max(stack, axis=0)
+        
         rr = self.pp['roi']
         pos_sr = np.empty((id.shape[0], 2), dtype=np.float32)
         for peak in range(id.shape[0]):
@@ -643,7 +684,27 @@ class MultiplaneCalibration:
 
 
 
+    def pre_translate_markers(self, ref, tar):
+        # Calculate the centroids of ref and tar
+        centroid_ref = np.mean(ref, axis=0)
+        centroid_tar = np.mean(tar, axis=0)
+        
+    
+        plt.figure()
+        plt.scatter(tar[:,0], tar[:,1], color='r')
+        plt.scatter(ref[:,0], ref[:,1])
+        plt.scatter(centroid_ref[0], centroid_ref[1], color="black")
+        plt.scatter(centroid_tar[0], centroid_tar[1], color="green")
 
+        # Step 2: Calculate the translation vector
+        tt = centroid_ref - centroid_tar
+        
+        # Step 3: Apply the translation to tar
+        aligned_tar = tar + tt
+        plt.scatter(aligned_tar[:,0], aligned_tar[:,1], color='r', marker='+')
+        plt.show()
+
+        return ref, aligned_tar, tt
 
 
 ################################################################################

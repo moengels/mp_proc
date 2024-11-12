@@ -49,8 +49,9 @@ class MultiplaneProcess:
     P['flip_axis'] = 2 # axis along which planes are mirrored
     P['padding'] = -10 # pixels for padding of found FOV
     P['use_projection'] = 'median' # projection type to use for registration, (median, max, min
-    P['ref_plane'] = 2
-    P['apply_transform'] = True
+    P['ref_plane'] = 2 # reference plane to which  affine transform is determined 
+    P['apply_transform'] = True # apply the affine transform before saving data
+    P['pretranslate'] = False # determine and apply shift based on all loc centroid before determining affine transform  
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -59,7 +60,7 @@ class MultiplaneProcess:
     def __init__(self):
 
         self.filenames = []
-        self.metadata_files = {}
+        #self.metadata_files = {}
         self.output_path = None
         self.cal_path = None
         self.path = None
@@ -187,7 +188,6 @@ class MultiplaneProcess:
             # figure out plane order otherwise take default order
             self.update_metadata(get_fileID(self.filenames[0]))
             self.cal['dz'], self.cal['order'], self.mcal = self.estimate_interplane_distance(fovs)
-            #self.cal['order'] = self.get_plane_order(fovs)
             print()
         else: 
             self.cal['order'] = self.P['order_default'] 
@@ -197,29 +197,21 @@ class MultiplaneProcess:
         print(f"Using order {self.cal['order']}")
         fps = np.ones(N_img[0])*(N_img[1]/2)
         fps = fps.astype(np.uint16)
-        #fovs = fovs[self.cal['order'][::-1],:,:,:]
+
 
         if 'brightness' not in self.cal.keys():
-            self.cal['brightness'] = self.estimate_brightess_from_stack(fovs[self.cal['order'][::-1],:,:,:]) 
+            self.cal['brightness'] = self.estimate_brightess_from_stack(fovs[self.cal['order'],:,:,:]) 
 
         if 'transform' not in self.cal.keys():
             if is_bead:
-                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'][::-1],:,:,:], self.P['ref_plane'])
+                self.mcal.pretranslate = self.P['pretranslate']
+                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
                 self.mcal.display_transformations()
             else:
-                
-                #self.cal['transform'] = self.get_average_transform_via_xcorr(fovs[self.cal['order'][::-1],:,:,:], fps)
-                #self.cal['transform'] = self.get_average_transform_via_SIFT(fovs[self.cal['order'][::-1],:,:,:]) 
-                self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'][::-1],:,:,:]) 
+                self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
 
         print("Registration of data...")
-        '''
-        if is_bead:
-            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
-        else:
-            registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
-        '''
-        registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+        registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
 
         registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
         if len(registered_subimages.shape) == 4:
@@ -800,16 +792,7 @@ class MultiplaneProcess:
 
             fps = np.ones(N_img[0])*(N_img[1]/2)
             fps = fps.astype(np.uint16)
-            fovs[self.cal['order'][::-1],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'][::-1],:,:,:]) 
-
-            # check whether transform in cal data is translation only or affine 
-            # simplified test via var type
-            if isinstance(self.cal['transform'], dict): 
-                #self.cal['transform'][1].shape == (2,3):
-                is_affine = True
-            #elif self.cal['transform'][1].shape == (3, 2):
-            else:
-                is_affine = False
+            fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
 
             print("Registration of data...")
             '''
@@ -818,15 +801,15 @@ class MultiplaneProcess:
                     from multiplane_calibration import MultiplaneCalibration
                     self.mcal = MultiplaneCalibration()
                  
-                registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+                registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'],:,:,:], self.cal['transform'])
             else:
-                registered_subimages = self.transform_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+                registered_subimages = self.transform_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
             '''
 
             if self.P['apply_transform']: 
-                registered_subimages = self.register_image_stack(fovs[self.cal['order'][::-1],:,:,:], self.cal['transform'])
+                registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
             else: 
-                registered_subimages = fovs[self.cal['order'][::-1],:,:,:]
+                registered_subimages = fovs[self.cal['order'],:,:,:]
 
             # clean up values outside 16bit tiff range    
             registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
