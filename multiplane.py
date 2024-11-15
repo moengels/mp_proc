@@ -210,8 +210,13 @@ class MultiplaneProcess:
             else:
                 self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
 
+        if self.P['apply_transform']: 
+            print("Registration of data...")
+            registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
+        else: 
+            registered_subimages = fovs[self.cal['order'],:,:,:]
         print("Registration of data...")
-        registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
+        
 
         registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
         if len(registered_subimages.shape) == 4:
@@ -794,19 +799,8 @@ class MultiplaneProcess:
             fps = fps.astype(np.uint16)
             fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
 
-            print("Registration of data...")
-            '''
-            if is_affine:
-                if self.mcal is None:
-                    from multiplane_calibration import MultiplaneCalibration
-                    self.mcal = MultiplaneCalibration()
-                 
-                registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'],:,:,:], self.cal['transform'])
-            else:
-                registered_subimages = self.transform_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
-            '''
-
             if self.P['apply_transform']: 
+                print("Registration of data...")
                 registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
             else: 
                 registered_subimages = fovs[self.cal['order'],:,:,:]
@@ -963,11 +957,6 @@ def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension
                     current_batch.append(image)
                 except UnicodeDecodeError:
                     print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
-                '''
-                # Read the current page as a NumPy array
-                image = tif.pages[i].asarray()
-                current_batch.append(image)
-                '''
 
                 # If the batch size is reached, process and yield the batch
                 if len(current_batch) == batch_size * n_cams:
@@ -980,6 +969,14 @@ def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension
     # If there are remaining images after all files are processed, yield them as a batch
     if current_batch:
         remaining_size = len(current_batch) // n_cams
-        batch_array = np.array(current_batch)
-        batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+
+        try: 
+            batch_array = np.array(current_batch)
+            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+        except ValueError:
+            *batch_array, _ = batch_array
+            batch_array = np.array(current_batch)
+            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+        
         yield batch_array
+
