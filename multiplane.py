@@ -12,6 +12,7 @@ import json
 from glob import glob
 import cv2
 from natsort import natsorted
+import h5py
 
 from utils.qpmain import qpmain
 from utils.phase_structure import phase_structure
@@ -38,6 +39,7 @@ class MultiplaneProcess:
     P['dz']=620 #nm
     P['dz_stage']=  100 #nm
     P['dt']=30 #ms, default
+    P['pxlsize']= 108 #nm
     P['dF_batch']=2000 #frames, framebatch_size default
     P['do_phase']=False #bool whether to calculate phase from brightfield
     P['do_preproc']=True #bool whether to do preprocessing (FOV detection, cal estimation etc)
@@ -47,11 +49,12 @@ class MultiplaneProcess:
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
     P['flip_axis'] = 2 # axis along which planes are mirrored
-    P['padding'] = -10 # pixels for padding of found FOV
+    P['padding'] = -40 # pixels for padding of found FOV
     P['use_projection'] = 'median' # projection type to use for registration, (median, max, min
     P['ref_plane'] = 2 # reference plane to which  affine transform is determined 
     P['apply_transform'] = True # apply the affine transform before saving data
     P['pretranslate'] = False # determine and apply shift based on all loc centroid before determining affine transform  
+    P['zrange_psf'] = 1200 # nm +- around fp to save for psf calibration
 
     file_extensions = [".tif", ".tiff"]
     log = False
@@ -70,6 +73,9 @@ class MultiplaneProcess:
         self.save_individual = False
         self.deskew_cam = True
         self.mcal = None # multiplane calibration instance
+        self.smlcal = None
+        self.markers = {}
+
         #self.path = self.select_data_directory()
 
 
@@ -178,7 +184,10 @@ class MultiplaneProcess:
             splits = [l[:min_len,...] for l in splits]
 
             image = np.array(np.stack(splits, axis=1))
-
+        # write stack properties
+        self.cal['steps'] = image.shape[0]
+        self.cal['dz_stage'] = self.P['dz_stage']
+        
         # find bbox and skew angle
         fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image, n_planes=self.P['nplanes']) 
 
@@ -188,7 +197,8 @@ class MultiplaneProcess:
             # figure out plane order otherwise take default order
             self.update_metadata(get_fileID(self.filenames[0]))
             self.cal['dz'], self.cal['order'], self.mcal = self.estimate_interplane_distance(fovs)
-            print()
+            self.cal['labels'] = self.mcal.dz['labels'] # plane labels
+            self.cal['fp'] = self.mcal.dz['fp'] # focal plane
         else: 
             self.cal['order'] = self.P['order_default'] 
             self.cal['dz'] = self.P['dz']
@@ -205,8 +215,9 @@ class MultiplaneProcess:
         if 'transform' not in self.cal.keys():
             if is_bead:
                 self.mcal.pretranslate = self.P['pretranslate']
-                self.cal['transform'] = self.mcal.get_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
-                self.mcal.display_transformations()
+                self.cal['transform'], self.cal['transform_quality'], self.markers = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                #self.cal['transform'], self.cal['transform_quality'], self.markers = self.mcal.get_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                #self.mcal.display_transformations()
             else:
                 self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
 
@@ -225,7 +236,26 @@ class MultiplaneProcess:
             # axes = 'ZCTYX'
             axes = 'CTZYX'
 
-        if self.log:
+
+        if self.save_individual: 
+            self.cal['zrange_psf'] = self.P['zrange_psf'] 
+            num_slices = int(self.P['zrange_psf']/self.cal['dz_stage'])
+            self.cal['psf_slices'] = 2*num_slices
+            
+            for i in range(registered_subimages.shape[0]):
+                #######################################################
+                slice_start, slice_end = self.get_psf_slices(registered_subimages.shape[1], self.cal['fp'][i], num_slices)
+
+                fp_range = [slice_start, slice_end]
+
+                #tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tiff'), registered_subimages[i,slice_start:slice_end,...],
+                tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tiff'), registered_subimages[i,...], 
+                        metadata={
+                            'axes': axes,
+                            'TimeIncrement': self.P['dt']
+                        }
+                    ) 
+        else:
             self.create_cal_path()
             tifffile.imwrite(os.path.join(self.cal_path, self.filenames[0]), registered_subimages, 
                         metadata={
@@ -236,8 +266,26 @@ class MultiplaneProcess:
                     ) 
 
         self.write_calibration()
+        self.write_marker_planes(registered_subimages)
 
         return self.cal 
+
+    #get_psf_slices(registered_subimages.shape, self.cal['fp'][i], num_slices)
+    def get_psf_slices(self, stack_range, fp, num_slices):
+        slice_start = np.max([0, int(fp - num_slices)])
+        slice_end = np.min([stack_range-1, int(fp + num_slices)]) 
+        
+        d = 2*num_slices - (slice_end-slice_start)
+
+        if d > 0: 
+            if slice_end == stack_range-1:
+                slice_start -= d
+            elif slice_start == 0:
+                slice_end += d
+            else:
+                print("Cant find appropriate size for psf z range")
+
+        return int(slice_start), int(slice_end)
 
     def get_plane_order(self, stack):
         return stack
@@ -248,6 +296,17 @@ class MultiplaneProcess:
             #yaml.dump(self.cal, yaml_file, default_flow_style=False)
             json.dump(self.cal, yaml_file, cls=NumpyEncoder)
 
+
+    def write_marker_planes(self, stack):        
+        #makeFolder(path)
+        for i in range(stack.shape[0]):
+        # Write data to HDF5
+            #with h5py.File(os.path.join(self.path,f'locs_{i}.hd5f'), "w") as data_file:
+            #    data_file.create_dataset(f'locs_{i}.hd5f', data=self.markers[i])
+            fp = self.cal['fp'][i] 
+            tifffile.imwrite(os.path.join(self.cal_path, f'fp_{i}.tiff'), stack[i,fp,...])     
+
+        print("Finished writing marker planes")
 
     def get_files_with_metadata(self):
         for file in os.listdir(self.path):
@@ -273,7 +332,10 @@ class MultiplaneProcess:
             self.meta[k] = self.parse_metafile(k)
         return self.meta
     
-    def update_metadata(self, filename):
+    def update_metadata(self, filename=None):
+        if filename is None: 
+            filename = list(self.meta.keys())[0]
+        
         self.P['dz_stage']=  float(self.meta[filename]['z-step_um'])*1000 #nm
     
     
@@ -566,18 +628,6 @@ class MultiplaneProcess:
         return skim.measure.regionprops(label_image)
     
 
-    '''
-        def threshold_segment(self, mip, th):
-        binary = mip > th
-        mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
-
-        morph = skim.morphology.dilation(mask)
-        #segm = skim.segmentation.clear_border(morph)
-        label_image = skim.measure.label(morph)
-
-        return skim.measure.regionprops(label_image)
-    '''
-
     def adjust_bbox(self, shape, bbox, bbox_size):
         #assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
         #assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
@@ -734,8 +784,6 @@ class MultiplaneProcess:
         print(f"Finished writing {output_name}")
 
 
-#######################################################################
-
     def apply_brightness_correction(self, image):
         for p in range(image.shape[0]):
             image[p,...] = np.divide(image[p,...], self.cal['brightness'][p])
@@ -758,37 +806,8 @@ class MultiplaneProcess:
         ncams = self.P['ncams']
 
         file_specifier = get_fileID(self.filenames[filecounter])
-        #tif = tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
-        #width, height = tif.pages._keyframe.keyframe.imagewidth, tif.pages._keyframe.keyframe.imagelength
-
-        for image in read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams']):
-        #while run:
-            # file loading via tifffile plugin, reading metadata for parsing
-            '''
-            try:
-                f_range=np.min([int(np.ceil(self.P['dF_batch'] / ncams)), int(np.ceil(len(tif.pages) / ncams))]) 
-                #image = tifffile.imread(os.path.join(path, filenames[0]), key=range(f, f+framebatch, framebatch))
-                #image=np.zeros((f_range, ncams, width, height))
-                image=np.zeros((f_range, ncams, height, width))
-                kk=0
-                print(f'\n Loading file {file_specifier} batch {idx}')
-                while kk<np.min([self.P['dF_batch'], len(tif.pages)]):
-                    if f is len(tif.pages):
-                        filecounter+=1 
-                        tif=tifffile.TiffFile(os.path.join(self.path, self.filenames[filecounter]))
-                        f=0
-                    
-                    #image[int(np.floor(kk/ncams)),int(kk%ncams), :,:] = np.transpose(tif.pages[int(f)].asarray(), [1,0])
-                    image[int(np.floor(kk/ncams)),int(kk%ncams), :,:] = tif.pages[int(f)].asarray()
-                    kk+=1 # current frame counter
-                    f+=1 # global frame counter
-                idx+=1 # savefile counter
-            except:
-                run=False
-                continue
-            '''
-
        
+        for image in read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams']):
             ### 
             idx+=1
             N_img = image.shape 
@@ -845,7 +864,28 @@ class MultiplaneProcess:
                 ) 
         print(f"Finished processing {self.path}")
 
+#########################################
+# single molecule localisation calibration
+#########################################
 
+
+    def calibrate_sml(self):
+        from smlm_calibration import smlm_calibration
+        if self.mcal is None:
+            markers = None
+        else:
+            markers = self.mcal.markers
+            
+        self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
+        cal = {}
+        cal["biplane"], cal["multiplane"]= self.smlcal.biplane_calibration()
+
+        return cal
+
+
+#########################################
+#TRANFORMS
+#########################################
 
     def get_affine_transform(self, stack):
         # stack: z, t, y, x 
@@ -912,6 +952,8 @@ class MultiplaneProcess:
 
         return stack
 
+#######################################################
+#END OF CLASS
 #######################################################
 
 class NumpyEncoder(json.JSONEncoder):

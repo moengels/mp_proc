@@ -3,13 +3,15 @@ import matplotlib.pyplot as plt
 from matplotlib.legend import Legend
 import skimage.filters as skfilt
 from skimage import feature, io
-from scipy import ndimage
-from tqdm import tqdm 
+from scipy import ndimage, spatial
 from scipy.optimize import curve_fit
+from tqdm import tqdm 
 from matplotlib.colors import LinearSegmentedColormap
 import warnings
 import os
 import cv2
+import quads
+import math
 warnings.filterwarnings('ignore')
 
 
@@ -45,20 +47,27 @@ class MultiplaneCalibration:
         self.pos_sr = {}
         self.order = []
         self.beads = {}
-        self.log = False
+        self.log = True
         self.tracks={}
         self.figs = {}
         self.pretranslate = False
+        self.kd = {}    # distance trees
+        self.quad = {}  # quads 
 
         self.beadID = {} # bead candidates found in maximum intensity projection
         self.markers = {} # SR loclaised beads in MIP for tranformation finding
         self.transform = {}
+        self.transform_error = {}
         #processing parameters
         self.pp = {'gauss_sigma': 1.5, # sigma for DoG gaussian kernel
                    'roi' : 10, # roi radius around peak, to delete locs near edges 
                    'frame_min' : 15, # min amount of consecutive frames to consider it a bead trace
                    'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
-                   'zstep': 10}  # default stage zstep size for coregistration nd PSF fitting
+                   'zstep': 10, # default stage zstep size for coregistration nd PSF fitting
+                   'min_size': 5.0, # min size for quad finding in distance trees 
+                   'max_size': 100.0, # max size for quad finding in distance trees
+                   'tolerance': 0.01,  # tolerance for quad acceptance
+                    'max_neighbours' : 10} #distance tree neighbours
 
 
     def setlog(self, log=bool):
@@ -71,6 +80,8 @@ class MultiplaneCalibration:
         planes = stack.shape[0]
         self.pp['planes'] = planes
         self.pp['stack_height'] = stack.shape[1]
+        self.pp['stack_sx'] = stack.shape[-2]
+        self.pp['stack_sy'] = stack.shape[-1]
         pos_candidate_all = {}
         outer = tqdm(total=planes, desc='Finding peak candidates', position=0)
         for p in range(planes):
@@ -101,7 +112,7 @@ class MultiplaneCalibration:
         print('Determining relative z-distances and order')
         self.dz, self.order = self.get_dz()
         print(self.dz)
-        return self.dz
+        return self.dz, self.order, self
 
 
     def set_zstep(self, zstep):
@@ -202,13 +213,7 @@ class MultiplaneCalibration:
         rr = self.pp['roi']
         z_pos, Nx, Ny = stack.shape
         pos_sr = pos_candidate.copy().astype(np.float32)
-        pos_sr = np.append(pos_sr, np.zeros((pos_sr.shape[0], 1), dtype=np.float32), axis=1)
-
-        if self.log:
-            f = plt.figure()
-            #Calculate the number of subplots that will be drawn - based on how many peaks are found
-            subplotsize = int(np.ceil(np.sqrt(pos_candidate.shape[0])))
-        
+        pos_sr = np.append(pos_sr, np.zeros((pos_sr.shape[0], 1), dtype=np.float32), axis=1)        
         skip_counter = 0    
 
         for peak in range(pos_candidate.shape[0]):
@@ -219,12 +224,6 @@ class MultiplaneCalibration:
                 skip_counter+=1
                 #print(f"Skipping peak {peak}, irregular shape: {roi.shape}")
                 continue
-
-            if self.log:
-                #Show the ROIs in a subplot image
-                plt.subplot(subplotsize,subplotsize,peak+1)
-                plt.imshow(roi.copy(),cmap='gray')
-
 
             # sr position in roi crop 
             roi_pos = list(self.phasor_localise(roi))
@@ -429,7 +428,7 @@ class MultiplaneCalibration:
 
         res = res[new_order, :] 
         self.order = new_order
-        self.dz['dz'] = [res[i+1,1]-res[i,1] for i in range(res.shape[0]-1)]
+        self.dz['dz'] = [(res[i+1,1]-res[i,1])*self.pp['zstep'] for i in range(res.shape[0]-1)]
         self.dz['labels'] = [f'{i+1}-{i}' for i in range(res.shape[0]-1)]
         self.dz['fp'] = [int(nz) for nz in res[:,1]]
 
@@ -499,20 +498,21 @@ class MultiplaneCalibration:
         for p in range(planes):
             self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
             outer.update(1)
-        '''
-        # match the markers
-        outer = tqdm(total=planes, desc='Matching markers', position=0) 
-        for p in range(1,planes):
-            self.markers[p]= self
-            outer.update(1)
-        '''
+
         # calculate tranformation
         outer = tqdm(total=planes, desc='Calculating transform')
+        transform_error = {}
         for p in range(planes):
-            self.transform[p]= self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
+            self.transform[p], self.markers[p], transform_error[p] = self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
             outer.update(1)
 
-        return self.transform
+            self.transform_error[p] = {}
+            self.transform_error[p]['mean'] = np.mean(transform_error[p])
+            self.transform_error[p]['std'] = np.std(transform_error[p])
+            self.transform_error[p]['marker_count'] = len(transform_error[p])
+            print(f"Plane {p}: Pixel2pixel_error: {self.transform_error[p]['mean']:.4f} +-: {self.transform_error[p]['std']:.4f}, with Pixel2pixel_error: {self.transform_error[p]['marker_count']} markers")
+
+        return self.transform, self.transform_error, self.markers
 
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
@@ -569,18 +569,21 @@ class MultiplaneCalibration:
             affine_matrix[1,2] += tt[1]
 
         
-        else:
-            tar_match = self.apply_affine_transform_2points(tar_match, affine_matrix)
-            plt.figure()
-            plt.scatter(tar[:,0], tar[:,1], color='r', marker="o", alpha=0.3)
-            plt.scatter(ref[:,0], ref[:,1], color="black", marker="o", alpha=0.3)
 
-            plt.scatter(tar_match[:,0], tar_match[:,1], color='r', marker='+')
-            plt.scatter(ref_match[:,0], ref_match[:,1], color="black", marker='+')
-            plt.legend(["target", "reference", "warped target", "matched reference"])
-            plt.show()
+        tar_match = self.apply_affine_transform_2points(tar_match, affine_matrix)
+        plt.figure()
+        plt.scatter(tar[:,0], tar[:,1], color='r', marker="o", alpha=0.3)
+        plt.scatter(ref[:,0], ref[:,1], color="black", marker="o", alpha=0.3)
 
-        return affine_matrix
+        plt.scatter(tar_match[:,0], tar_match[:,1], color='r', marker='+')
+        plt.scatter(ref_match[:,0], ref_match[:,1], color="black", marker='+')
+        plt.legend(["target", "reference", "warped target", "matched reference"])
+        plt.show()
+
+        error_xy = ref_match-tar_match
+        error_all = [np.sqrt((cc[0]**2) + (cc[1]**2)) for cc in error_xy]
+        
+        return affine_matrix, tar_match, error_all
     
 
 
@@ -706,6 +709,183 @@ class MultiplaneCalibration:
 
         return ref, aligned_tar, tt
 
+
+
+
+
+    def get_micrometry_transformation(self, stack, refplane):
+        if self.log:
+            print('Using quad based transformation estimation')
+        # determine affine transformation between planes
+        planes = self.pp['planes']
+        
+        # if markers are empty, find them first
+        outer = tqdm(total=planes, desc='Finding markers', position=0)
+        for p in range(planes):
+            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
+            outer.update(1)
+
+        outer = tqdm(total=planes, desc='Creating quads', position=0)
+        # create tree and quad from loc positions
+        for p in range(planes):
+            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
+                                            y = self.markers[p][:,1],
+                                            min_size = self.pp['min_size'],
+                                            max_size = self.pp['max_size'],
+                                            max_neighbors = 10)
+            self.kd[p] = kd
+            self.quad[p] = quad
+            outer.update(1)
+
+        # calculate tranformation
+        outer = tqdm(total=planes, desc='Calculating transform')
+        transform_error_estimate = {}
+        for p in range(planes):
+            [transform_error_estimate[p], self.transform[p]] = self.findTransform(ref_quad=self.quad[refplane],
+                                                                                    other_quad = self.quad[p],
+                                                                                    ref_kd=self.kd[refplane],
+                                                                                    other_kd=self.kd[p])
+            outer.update(1)
+
+            if (transform_error_estimate[p] > 10.0):
+                plotMatch(self.kd[refplane],
+                        self.kd[p],
+                        self.transform[p],
+                        save_as = f"transform_ref{refplane}_other{p}.png",
+                        show = self.log)
+            
+        return self.transform, self.transform_error, self.markers
+
+################################################################################
+# Micrometry babcock
+################################################################################
+
+    def findTransform(self, ref_quad, other_quad, ref_kd, other_kd, tolerance = None, min_size = None, max_size = None, max_neighbors = None):
+
+        if max_neighbors is None:
+            max_neighbors = self.pp['max_neighbours']
+            
+        if max_size is None:
+            max_size = self.pp['max_size']
+            
+        if min_size is None:
+            min_size = self.pp['min_size']
+
+        if 'density' not in self.pp.keys():
+            if 'stack_sx' not in self.pp.keys():
+                print("Couldn't find stack dimensions, estimating loc density to 1/(30*30)um**2")
+                self.pp['density'] = 1/(30**2)
+            else:
+                self.pp['density'] = 1/(self.pp['stack_sx']*self.pp['stack_sy'])
+        
+        if tolerance is None:
+            tolerance = self.pp['tolerance']
+
+        if self.log:
+            print("")
+            print("Comparing quads.")
+        
+        #
+        # Unlike astrometry.net we are just comparing all the quads looking for the
+        # one that has the best score. This should be at least 10.0 as, based on
+        # testing, you can sometimes get scores as high as 9.7 even if the match
+        # is not actually any good.
+        #
+        best_ratio = 0.0
+        best_transform = None
+        matches = 0
+        for q1 in ref_quad:
+            for q2 in other_quad:
+                if q1.isMatch(q2, tolerance = tolerance):
+                    fg_p = fgProbability(ref_kd, other_kd, q1.getTransform(q2), self.pp['density'])
+                    ratio = math.log(fg_p/self.pp['density'])
+                    if self.log:
+                        print("Match {0:d} {1:.2f} {2:.2e} {3:.2f}".format(matches, fg_p, self.pp['density'], ratio))
+                    if (ratio > best_ratio):
+                        best_ratio = ratio
+                        best_transform = q1.getTransform(q2) + q2.getTransform(q1)
+                    matches += 1
+
+        if self.log:
+            print("Found", matches, "matching quads")
+
+        return [best_ratio, best_transform]
+    
+
+
+###############################################################
+# utilities
+###############################################################
+
+def applyTransform(kd, transform):
+    tx = transform[0]
+    ty = transform[1]
+    x = tx[0] + tx[1]*kd.data[:,0] + tx[2]*kd.data[:,1]
+    y = ty[0] + ty[1]*kd.data[:,0] + ty[2]*kd.data[:,1]
+    return [x, y]
+
+
+def fgProbability(kd1, kd2, transform, bg_p):
+    """
+    Returns an estimate of how likely the transform is correct.
+    """
+    # Transform 'other' coordinates into the 'reference' frame.
+    [x2, y2] = applyTransform(kd2, transform)
+    p2 = np.stack((x2, y2), axis = -1)
+
+    # Calculate distance to nearest point in 'reference'.
+    [dist, index] = kd1.query(p2)
+
+    # Score assuming a localization accuracy of 1 pixel.
+    fg_p = bg_p + (1.0 - bg_p) * np.sum(np.exp(-dist*dist*0.5))/float(x2.size)
+    return fg_p
+
+    
+def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = 10):
+    """
+    Make a KD tree and a list of quads from x, y points.
+    """
+    kd = spatial.KDTree(np.stack((x, y), axis = -1))
+    m_quads = quads.makeQuads(kd,
+                              min_size = min_size,
+                              max_size = max_size,
+                              max_neighbors = max_neighbors)
+    return [kd, m_quads]
+
+
+def plotMatch(kd1, kd2, transform, save_as = None, show = True):
+    [x2, y2] = applyTransform(kd2, transform)
+    
+    fig = plt.figure()
+    plt.scatter(kd1.data[:,0], kd1.data[:,1], facecolors = 'none', edgecolors = 'red', s = 100)
+    plt.scatter(x2, y2, color = 'green', marker = '+', s = 100)
+
+    legend = plt.legend(('reference', 'other'), loc=1)
+    plt.xlabel("pixels")
+    plt.ylabel("pixels")
+
+    ax = plt.gca()
+    ax.set_aspect('equal')
+
+    if save_as is not None:
+        fig.savefig(save_as)
+    
+    if show:
+        plt.show()
+
+
+def prettyPrintTransform(transform):
+    """
+    Pretty print the transform.
+    """
+    print("Reference to other transform:")
+    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[2][0], transform[2][1], transform[2][2]))
+    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[3][0], transform[3][1], transform[3][2]))
+    print("")
+    print("Other to reference transform:")
+    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[0][0], transform[0][1], transform[0][2]))
+    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[1][0], transform[1][1], transform[1][2]))
+    print("")
 
 ################################################################################
 # END CLASS
