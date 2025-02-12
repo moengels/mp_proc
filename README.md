@@ -28,23 +28,26 @@ This calibration file can subsequently be used to process data created with the 
 
 ### First steps to adapt to your system (Micro-Manager run system)
 Create an instance of the MultiplaneProcess
-` from multiplane import MultiplaneProcess `
-` p = MultiplaneProcess() ` 
+    
+    from multiplane import MultiplaneProcess
+    p = MultiplaneProcess()
 
 update the parameters specific to your system, in particular: 
-` p.P['pxlsize']= 108 #nm `
-` p.P['ncams']=2 #how many detectors used `
-` p.P['nplanes']= 8 # how many planes across all cameras`
-` p.P['order_default']= [2,3,0,1] # default order of planes after cropping, order: camera, coordinates (left to right, top to bottom)`
-` p.P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)`
-` p.P['ref_plane'] = 2 # reference plane to which affine transform is determined, should be within range`
+    p.P['pxlsize']= 108 #nm `
+    p.P['ncams']=2 #how many detectors used `
+    p.P['nplanes']= 8 # how many planes across all cameras`
+    p.P['order_default']= [2,3,0,1] # default order of planes after cropping, order: camera, coordinates (left to right, top to bottom)`
+    p.P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)`
+    p.P['ref_plane'] = 2 # reference plane to which affine transform is determined, should be within range`
 
 ### First steps to adapt to your system (non- Micro-Manager data)
 
 Adapt all the above. 
-In addition, you either write your own metadata parser (see current version under utils/metadata.py) or adjust the relevant parameters for each processing instance: 
-` p.P['dz_stage']=  100 #nm, zstage displacement per frame during calibration `
-` p.file_extensions = [your_fileformat]`
+In addition, you either write your own metadata parser (see current version under utils/metadata.py) or adjust the relevant parameters for each processing instance:
+ 
+```
+p.P['dz_stage']=  100 #nm, zstage displacement per frame during calibration p.file_extensions = [your_fileformat]
+```
 
 
 ## Calibration
@@ -57,7 +60,7 @@ If more than one camera is used, but the additional camera(s) are saved in frame
 ### Deskewing
 Initially, each individual camera is assesed for global skew of the illuminated areas on the sensor. This used to be a source of error in cropping as this can cause overlapping FOVs of the indivudal planes assuming a rectangular bounding box. The tilt angle is determined by running a canny edge detection on the median z-projection of the stack, then summing the assumed outline of the illuminated areas to a 1-d distribution in x. A range of potential tilt angles is sampled, whereby the one yielding the highest count of edge pixels along an axis is the supposed best rotation angle. 
 
-![Raw frame processing](documentation/beadstack_processing.png)
+![Raw frame processing](documentation/processing_visualisation.png)
 
 ### FOV selection
 Image planes on the sensor need to be identified. Thresholding is an obvious approach to it, threshold selection is however not trivial. As the brightness across image planes varies depening on the imaging wavelength, a global otsu-threshold can fail by interpreting differently bright planes as the distributions to separate and not signal to background. 
@@ -79,9 +82,9 @@ To identify the axial order and spacing of focal planes, beads are identified in
 We tried a battery of registration approaches to co-align the subimages. The figure belows outlines the old approach using bead idenitification (=marker) at the respective focal plane via phasor-localisation, a marker-selection process via mean-coordinate pre-shifting and coorindate outlier rejection if marker counts between reference and target image do not correspond. 
 Subsequently and affine transform that minimises spatial separatino across markers is caluclated via the openCV package. We employ a reference plane that can be set via P['ref_plane'] as one of the central planes to register to (instead of iterative pairwise registration). 
 
-![Multiplane calibration](documentation/processing_visualisation.png)
+![Multiplane calibration](documentation/beadstack_processing.png)
 
-In addition, a spatial distance check is conducted that relates relative to abolute distances of markers to evaluate whether there are magnification changes between the subimages (due to misalingment in the 4f system).   
+In addition, a spatial distance check is conducted that relates relative to abolute distances of markers to evaluate whether there are magnification changes between the subimages (mostly due to misalingment in the 4f system).   
 
 ### Outputs
 The calibration writes a calibration file (cal.json) to the data directory and creates a subfolder /cal_data wherein a graph for the interplane distance and the co-registered calibration data is stored. 
