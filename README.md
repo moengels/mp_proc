@@ -13,8 +13,8 @@ Code to calibrate and process data created in multiplane imaging OME, KG Lab, TU
 
 - Create a new virtual environment via the requirements file
 
-`conda create --name mp-env --file requirements.txt`
-`conda activate mp-env`
+    conda create --name mp-env --file requirements.txt
+    conda activate mp-env`
 
 ## Basic interaction
 
@@ -33,6 +33,7 @@ Create an instance of the MultiplaneProcess
     p = MultiplaneProcess()
 
 update the parameters specific to your system, in particular: 
+
     p.P['pxlsize']= 108 #nm `
     p.P['ncams']=2 #how many detectors used `
     p.P['nplanes']= 8 # how many planes across all cameras`
@@ -45,9 +46,9 @@ update the parameters specific to your system, in particular:
 Adapt all the above. 
 In addition, you either write your own metadata parser (see current version under utils/metadata.py) or adjust the relevant parameters for each processing instance:
  
-```
-p.P['dz_stage']=  100 #nm, zstage displacement per frame during calibration p.file_extensions = [your_fileformat]
-```
+    p.P['dz_stage']=  100 #nm, zstage displacement per frame during calibration 
+    p.file_extensions = [your_fileformat]
+
 
 
 ## Calibration
