@@ -22,7 +22,7 @@ defusedxml==0.7.1
 executing==2.0.1
 fastjsonschema==2.20.0
 fastremap==1.15.0
-filelock==3.16.0
+filelock==3.20.3
 fonttools==4.53.1
 fqdn==1.5.1
 fsspec==2024.9.0
