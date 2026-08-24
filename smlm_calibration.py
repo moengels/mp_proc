@@ -68,38 +68,41 @@ class smlm_calibration:
             )
 
         # Perform biplane calibration
-        cal = {'slope': {}}
+        #cal = {'slope': {}}
+        cal = {'slope': []}
         params_ = []
         for c in tqdm(self.biplane_markers.keys(), "Calibrate biplane PSF widths"):
             ir, it = self.biplane_markers[c]['ref_i'], self.biplane_markers[c]['tar_i']
             mr, mt = self.biplane_markers[c]['ref'], self.biplane_markers[c]['tar']
             z0 = np.mean([self.FP[ir], self.FP[it]])
             slope, sigma1, sigma2 = self.biplane_slope(image[ir, ...], image[it, ...], mr, mt, z0)
-            cal['slope'][c] = slope
-            if not params_:
+            #cal['slope'][c] = slope
+            cal['slope'].append(slope)
+            if not params_: # append first layer
                 params_.append(sigma1) 
-            #if not c+1 in params_.keys():
-            #    params_[c+1] = sigma2
+            # always add last processed layer 
             params_.append(sigma2) 
 
          # (amplitude, mean, sigma, offset)
-        cal['amp'] = np.mean([p for p in [params_.values()][0]]) 
-        cal['ddz'] = np.mean([p for p in [params_.values()][1]]) 
-        cal['sigma'] = np.mean([p for p in [params_.values()][2]]) 
-        cal['offset'] = np.mean([p for p in [params_.values()][3]]) 
+        params_array_ = np.array(params_)
+        cal['amp'] = np.median(params_array_[:,0]) 
+        cal['ddz'] = np.median(params_array_[:,1])  #np.mean([p for p in [params_.values()][1]]) 
+        cal['sigma'] = np.median(params_array_[:,2]) 
+        cal['offset'] = np.median(params_array_[:,3]) 
         return cal
     
 
     def biplane_slope(self, stack1, stack2, markers1, markers2, z0):
         """Main function to calculate the biplane slope."""
         num_slices, height, width = stack1.shape
+        dz_abs = np.abs(self.dz)  # Ensure dz is positive
         dz = self.dz
 
-        slice_multiple = round(self.zrange / dz)
+        slice_multiple = round(self.zrange / dz_abs)
         slice_start = int(max(0, z0 - slice_multiple))
         slice_end = int(min(num_slices, z0 + slice_multiple))
 
-        slice_multiple = round(self.zrange / dz)
+        slice_multiple = round(self.zrange / dz_abs)
         slice_start = int(max(0, z0 - slice_multiple))
         slice_end = int(min(num_slices, z0 + slice_multiple))
 
@@ -143,88 +146,55 @@ class smlm_calibration:
                 #mean_sigmas.append(np.nan)
                 mean_params.append(temp)
         return mean_params
-    '''
+    
 
-    def biplane_slope(self, stack1, stack2, markers1, markers2, z0):
-        num_slices, height, width = stack1.shape
-        dz = self.dz
+    def extract_sigma_y_values(self, stack, markers, slice_start, slice_end, height, width):
+        """Optimized extraction of sigma_y values for markers within a range of slices."""
+        sigma_y_values = []
+        rr = self.rr
+        max_marker = min(len(markers), self.max_marker)
+        pixelsize = self.pixelsize
 
-        slice_multiple = round(self.zrange / dz)
-        slice_start = int(max(0, z0 - slice_multiple))
-        slice_end = int(min(num_slices, z0 + slice_multiple))
+        for marker in markers[:max_marker]:
+            x_center, y_center, _ = marker
+            x_start = max(0, int(x_center) - rr)
+            x_end = min(height, int(x_center) + rr)
+            y_start = max(0, int(y_center) - rr)
+            y_end = min(width, int(y_center) + rr)
 
-        sigma_y_values_stack1 = []
-        sigma_y_values_stack2 = []
+            roi_height = x_end - x_start
+            roi_width = y_end - y_start
 
-        def gaussian_2D(xy, amplitude, x0, y0, sigma_x, sigma_y, offset):
-            """2D Gaussian function."""
-            x, y = xy
-            exp_term = np.exp(-((x - x0)**2 / (2 * sigma_x**2) + (y - y0)**2 / (2 * sigma_y**2)))
-            return amplitude * exp_term + offset
+            # Precompute meshgrid for the ROI shape
+            X, Y = np.meshgrid(np.arange(roi_width), np.arange(roi_height))
+            xy_data = np.vstack((X.ravel(), Y.ravel()))
 
-        # Outer loop for markers
-        for count, (marker1, marker2) in enumerate(zip(markers1, markers2)):
-            if count > self.max_marker:
-                break
-
-            marker_sigma_y_values_stack1 = []
-            marker_sigma_y_values_stack2 = []
+            marker_sigma_y_values = []
 
             for i in range(slice_start, slice_end):
-                # Extract slice data
-                slice_data1 = stack1[i]
-                slice_data2 = stack2[i]
+                roi = stack[i, x_start:x_end, y_start:y_end]
+                z_data = roi.ravel()
 
-                for marker, stack_data, sigma_values in [(marker1, slice_data1, marker_sigma_y_values_stack1),
-                                                        (marker2, slice_data2, marker_sigma_y_values_stack2)]:
-                    x_center, y_center, _ = marker
+                try:
+                    max_val = np.max(roi)
+                    min_val = np.min(roi)
+                    initial_params = [max_val, roi_width / 2, roi_height / 2, 3, 3, min_val]
+                    bounds = (
+                        [min_val, 0.0, 0.0, 0.1, 0.1, 0],
+                        [np.inf, roi_width, roi_height, np.inf, np.inf, max_val]
+                    )
 
-                    # Extract ROI centered at marker
-                    roi = stack_data[
-                        max(0, int(x_center) - self.rr):min(height, int(x_center) +self.rr),
-                        max(0, int(y_center) - self.rr):min(width, int(y_center) + self.rr)
-                    ]
+                    params, _ = curve_fit(gaussian_2D, xy_data, z_data, p0=initial_params, bounds=bounds)
+                    sigma_y = params[4] * pixelsize
+                    marker_sigma_y_values.append(sigma_y)
+                except Exception:
+                    marker_sigma_y_values.append(np.nan)
 
-                    # Generate fitting data
-                    X, Y = np.meshgrid(np.arange(roi.shape[1]), np.arange(roi.shape[0]))
-                    xy_data = np.vstack((X.ravel(), Y.ravel()))
-                    z_data = roi.ravel()
+            sigma_y_values.append(marker_sigma_y_values)
 
-                    try:
-                        # Initial parameters for Gaussian fit
-                        initial_params = [
-                            np.max(roi), roi.shape[1] / 2, roi.shape[0] / 2, 1, 1, np.min(roi)
-                        ]
-                        bounds = (0, [np.inf, roi.shape[1], roi.shape[0], np.inf, np.inf, np.max(roi)])
-                        # Fit the 2D Gaussian
-                        params, _ = curve_fit(gaussian_2D, xy_data, z_data, p0=initial_params, bounds=bounds)
-                        sigma_y = params[4] * self.pixelsize  # Scale sigma_y with pixel size
-                        sigma_values.append(sigma_y)
-                    #except RuntimeError:
-                    except:
-                        # If fit fails, append NaN
-                        sigma_values.append(np.nan)
+        return sigma_y_values
 
-            sigma_y_values_stack1.append(marker_sigma_y_values_stack1)
-            sigma_y_values_stack2.append(marker_sigma_y_values_stack2)
-
-        # Calculate the slope from the difference of sigma_y values
-        diff_val = np.array(sigma_y_values_stack1) - np.array(sigma_y_values_stack2)
-        z_diff = np.arange(diff_val.shape[1]) * dz
-
-        # Fit a line to the differences to compute the slope
-        slopes = []
-        for diff in diff_val:
-            valid_idx = ~np.isnan(diff)  # Ignore NaN values
-            if valid_idx.sum() > 1:
-                slope, _ = np.polyfit(z_diff[valid_idx], diff[valid_idx], 1)
-                slopes.append(slope)
-            else:
-                slopes.append(np.nan)
-
-        return np.median(slopes)
-
-'''
+    '''
     def extract_sigma_y_values(self, stack, markers, slice_start, slice_end, height, width):
         """Extract sigma_y values for markers within a range of slices."""
         sigma_y_values = []
@@ -255,10 +225,12 @@ class smlm_calibration:
                 try:
                     # Initial parameters for Gaussian fit
                     initial_params = [
-                        np.max(roi), roi.shape[1] / 2, roi.shape[0] / 2, 1, 1, np.min(roi)
+                        np.max(roi), roi.shape[1] / 2, roi.shape[0] / 2, 3, 3, np.min(roi)
                     ]
-                    bounds = (0, [np.inf, roi.shape[1], roi.shape[0], np.inf, np.inf, np.max(roi)])
+                    bounds = ([np.min(roi), 0.0, 0.0, 0.1, 0.1, 0]
+                              , [np.inf, roi.shape[1], roi.shape[0], np.inf, np.inf, np.max(roi)])
                     # Fit the 2D Gaussian
+                    # amplitude, x0, y0, sigma_x, sigma_y, offset
                     params, _ = curve_fit(gaussian_2D, xy_data, z_data, p0=initial_params, bounds=bounds)
                     sigma_y = params[4] * self.pixelsize  # Scale sigma_y with pixel size
                     marker_sigma_y_values.append(sigma_y)
@@ -267,6 +239,7 @@ class smlm_calibration:
 
             sigma_y_values.append(marker_sigma_y_values)
         return sigma_y_values
+    '''
 
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
@@ -290,14 +263,16 @@ class smlm_calibration:
         else:
             calpath = os.path.join(self.root_path, 'cal_data')
             filename = [f for f in os.listdir(calpath) if f.endswith(self.data_ext)]
-            if not any(filename):
+            
+            if len(filename)==1:
+                fname = filename[0]
+                fpath = calpath
+            else:
                 file_path = filedialog.askopenfile(title='Select registered bead stack', filetypes =[('Registered bead stack', '*.tif')])
                 fname = file_path.name 
                 fname = os.path.basename(file_path.name)
                 fpath = os.path.dirname(file_path.name)
-            else:
-                fname = filename[0]
-                fpath = calpath
+               
 
         return fpath, fname
     
@@ -310,7 +285,7 @@ class smlm_calibration:
         # clean up locs from the edges 
         th = np.std(mip_filt)*2 # minval local max
         
-        locs = skim.feature.peak_local_max(mip_filt, min_distance=7, threshold_abs = th)
+        locs = skim.feature.peak_local_max(mip_filt, min_distance=15, threshold_abs = th)
     
         # consolidate by removing locs from the borders
         markForDeletion = []
@@ -460,12 +435,12 @@ def slope_from_biplanePSF(path):
 
     return zcal
 
-
+'''
 def gaussian_2D(xy, amplitude, x0, y0, sigma_x, sigma_y, offset):
     x, y = xy
     exp_term = np.exp(-((x - x0)**2 / (2 * sigma_x**2) + (y - y0)**2 / (2 * sigma_y**2)))
     return amplitude * exp_term + offset
-
+'''
 
 def fit2Dgaussian(stack, p):
     height, width, num_slices = stack.shape

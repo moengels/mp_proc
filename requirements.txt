@@ -9,7 +9,7 @@ Babel==2.15.0
 beautifulsoup4==4.12.3
 bleach==6.1.0
 cellpose==3.0.11
-certifi==2024.7.4
+certifi==2024.6.2
 cffi==1.16.0
 charset-normalizer==3.3.2
 colorama==0.4.6
@@ -65,7 +65,7 @@ nbconvert==7.17.0
 nbformat==5.10.4
 nest-asyncio==1.6.0
 networkx==3.3
-notebook==7.2.2
+notebook==7.2.1
 notebook_shim==0.2.4
 numba==0.60.0
 numpy==1.26.4
